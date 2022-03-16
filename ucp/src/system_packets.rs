@@ -20,7 +20,6 @@ pub(crate) fn encode_syspacket<T : SystemPacket>(packet : T,dst : &mut Vec<u8>) 
     packet.encode(&mut writer)
 }
 
-
 #[derive(Den)]
 pub struct ConnectedPing {
     pub client_time_stamp : u64
@@ -172,4 +171,63 @@ pub struct UnconnectedPong {
 }
 impl SystemPacket for UnconnectedPong {
     const ID : u8 = 0x1c;
+}
+
+pub struct Acknowledge {
+    pub record_count: u16,
+    pub max_equals_min: bool,
+    pub sequences: (u32, u32),
+}
+impl Den for Acknowledge {
+    fn decode(bytes: &mut CursorReader) -> std::io::Result<Self> {
+        let record_count = u16::decode(bytes)?;
+        let max_equals_min = bool::decode(bytes)?;
+        let sequences;
+        let sequence = U24::decode(bytes)?;
+        if max_equals_min {
+            sequences = (sequence, sequence)
+        } else {
+            let sequence_max = U24::decode(bytes)?;
+            sequences = (sequence, sequence_max)
+        }
+        Ok(Self {
+            record_count,
+            max_equals_min,
+            sequences,
+        })
+    }
+
+    fn encode(&self, bytes: &mut CursorWriter) -> std::io::Result<()> {
+        u16::encode(&self.record_count, bytes)?;
+        bool::encode(&self.max_equals_min,bytes)?;
+        U24::encode(&self.sequences.0, bytes)?;
+        if !self.max_equals_min {
+            U24::encode(&self.sequences.1, bytes)?;
+        }
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        if self.max_equals_min {
+            6
+        }else {
+            9
+        }
+    }
+}
+
+#[derive(Den)]
+pub struct ACK {
+    pub ack : Acknowledge
+}
+impl SystemPacket for ACK {
+    const ID : u8 = 0xc0;
+}
+
+#[derive(Den)]
+pub struct NACK {
+    pub nack : Acknowledge
+}
+impl SystemPacket for NACK {
+    const ID : u8 = 0xa0;
 }
