@@ -1,9 +1,9 @@
-use std::{collections::HashMap, future::Future, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use conn::Conn;
 use system_packets::{
     decode_syspacket, encode_syspacket, OpenConnectionReply1, OpenConnectionReply2,
-    OpenConnectionRequest1, OpenConnectionRequest2, SystemPacket, UnconnectedPing, UnconnectedPong,
+    OpenConnectionRequest1, OpenConnectionRequest2, SystemPacket, UnconnectedPing, UnconnectedPong, IncompatibleProtocolVersion,
 };
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
@@ -14,6 +14,8 @@ pub(crate) mod conn;
 pub(crate) mod fragment;
 pub mod packets;
 pub(crate) mod system_packets;
+
+pub const PROTOCOL_VERSION : u8 = 0xA;
 
 type Udp = Arc<UdpSocket>;
 type Session = Arc<Mutex<Conn>>;
@@ -68,44 +70,14 @@ impl UcpListener {
                 } else {
                     match v[0] {
                         UnconnectedPing::ID => {
-                            let packet: UnconnectedPing = decode_syspacket(&v[..size])?;
-                            let pong = UnconnectedPong {
-                                time: packet.time_stamp,
-                                guid: self.guid,
-                                magic: (),
-                                motd: self.title.clone(),
-                            };
-                            let mut bytes = vec![];
-                            encode_syspacket(pong, &mut bytes)?;
-                            self.socket.send_to(&bytes[..], src).await?;
+                            self.handle_ping(&v[..size], src).await?;
                         }
                         OpenConnectionRequest1::ID => {
-                            let packet: OpenConnectionRequest1 = decode_syspacket(&v[..size])?;
-                            let reply = OpenConnectionReply1 {
-                                magic: (),
-                                guid: self.guid,
-                                use_encryption: false,
-                                mtu_size: packet.mtu_size,
-                            };
-                            let mut bytes = vec![];
-                            encode_syspacket(reply, &mut bytes)?;
-                            self.socket.send_to(&bytes[..], src).await?;
+                            self.handle_ocrequest1(&v[..size], src).await?;
                         }
                         OpenConnectionRequest2::ID => {
-                            let packet: OpenConnectionRequest2 = decode_syspacket(&v[..size])?;
-                            let reply = OpenConnectionReply2 {
-                                magic: (),
-                                guid: self.guid,
-                                address: src,
-                                mtu: packet.mtu,
-                                use_encryption: false,
-                            };
-                            let mut bytes = vec![];
-                            encode_syspacket(reply, &mut bytes)?;
-                            self.socket.send_to(&bytes[..], src).await?;
-
-                            let session = Arc::new(Mutex::new(Conn::new()));
-                            self.conns.insert(src, session.clone());
+                            let session =
+                                self.handle_ocrequest2(&v[..size], src).await?;
                             return Ok(UcpSession { conn: session });
                         }
                         _ => {}
@@ -113,5 +85,65 @@ impl UcpListener {
                 }
             }
         }
+    }
+
+    async fn handle_ping(&self, v: &[u8], src: SocketAddr) -> std::io::Result<()> {
+        let packet: UnconnectedPing = decode_syspacket(v)?;
+        let pong = UnconnectedPong {
+            time: packet.time_stamp,
+            guid: self.guid,
+            magic: (),
+            motd: self.title.clone(),
+        };
+        let mut bytes = vec![];
+        encode_syspacket(pong, &mut bytes)?;
+        self.socket.send_to(&bytes[..], src).await?;
+        Ok(())
+    }
+
+    async fn handle_ocrequest1(
+        &self,
+        v: &[u8],
+        src: SocketAddr,
+    ) -> std::io::Result<()> {
+        let packet: OpenConnectionRequest1 = decode_syspacket(v)?;
+        if packet.protocol_version != PROTOCOL_VERSION {
+            let reply = IncompatibleProtocolVersion{ server_protocol: PROTOCOL_VERSION, magic: (), server_guid: self.guid };
+            let mut bytes = vec![];
+            encode_syspacket(reply, &mut bytes)?;
+            self.socket.send_to(&bytes[..], src).await?;
+            return Ok(())
+        }
+        let reply = OpenConnectionReply1 {
+            magic: (),
+            guid: self.guid,
+            use_encryption: false,
+            mtu_size: packet.mtu_size,
+        };
+        let mut bytes = vec![];
+        encode_syspacket(reply, &mut bytes)?;
+        self.socket.send_to(&bytes[..], src).await?;
+        Ok(())
+    }
+
+    async fn handle_ocrequest2(
+        &mut self,
+        v: &[u8],
+        src: SocketAddr,
+    ) -> std::io::Result<Session> {
+        let packet: OpenConnectionRequest2 = decode_syspacket(v)?;
+        let reply = OpenConnectionReply2 {
+            magic: (),
+            guid: self.guid,
+            address: src,
+            mtu: packet.mtu,
+            use_encryption: false,
+        };
+        let mut bytes = vec![];
+        encode_syspacket(reply, &mut bytes)?;
+        self.socket.send_to(&bytes[..], src).await?;
+        let session = Arc::new(Mutex::new(Conn::new()));
+        self.conns.insert(src, session.clone());
+        Ok(session)
     }
 }

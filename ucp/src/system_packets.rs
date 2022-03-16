@@ -22,7 +22,7 @@ pub(crate) fn encode_syspacket<T: SystemPacket>(
     dst: &mut Vec<u8>,
 ) -> std::io::Result<()> {
     let mut writer = CursorWriter::new(dst);
-    writer.write(&[T::ID; 1])?;
+    writer.write_all(&[T::ID; 1])?;
     packet.encode(&mut writer)
 }
 
@@ -71,8 +71,8 @@ impl Den for OpenConnectionRequest1 {
     fn encode(&self, bytes: &mut CursorWriter) -> std::io::Result<()> {
         MAGIC::encode(&self.magic, bytes)?;
         u8::encode(&self.protocol_version, bytes)?;
-        let mut null_padding = vec![0u8; (self.mtu_size - 50) as usize]; //32(udp header) + 18(raknet data)
-        bytes.write_all(&mut null_padding)
+        let null_padding = vec![0u8; (self.mtu_size - 50) as usize]; //32(udp header) + 18(raknet data)
+        bytes.write_all(&null_padding)
     }
 
     fn size(&self) -> usize {
@@ -142,16 +142,6 @@ impl SystemPacket for ConnectionRequestAccepted {
 }
 
 #[derive(Den)]
-pub struct AlreadyConnected {
-    #[den(with = "MAGIC")]
-    pub magic: (),
-    pub guid: u64,
-}
-impl SystemPacket for AlreadyConnected {
-    const ID: u8 = 0x12;
-}
-
-#[derive(Den)]
 pub struct NewIncomingConnections {
     pub server_address: SocketAddr,
     pub request_timestamp: i64,
@@ -177,6 +167,17 @@ pub struct UnconnectedPong {
 }
 impl SystemPacket for UnconnectedPong {
     const ID: u8 = 0x1c;
+}
+
+#[derive(Den)]
+pub struct IncompatibleProtocolVersion {
+    pub server_protocol: u8,
+    #[den(with = "MAGIC")]
+    pub magic: (),
+    pub server_guid: u64,
+}
+impl SystemPacket for IncompatibleProtocolVersion {
+    const ID: u8 = 0x19;
 }
 
 pub struct Acknowledge {
@@ -223,17 +224,17 @@ impl Den for Acknowledge {
 }
 
 #[derive(Den)]
-pub struct ACK {
+pub struct Ack {
     pub ack: Acknowledge,
 }
-impl SystemPacket for ACK {
+impl SystemPacket for Ack {
     const ID: u8 = 0xc0;
 }
 
 #[derive(Den)]
-pub struct NACK {
+pub struct Nack {
     pub nack: Acknowledge,
 }
-impl SystemPacket for NACK {
+impl SystemPacket for Nack {
     const ID: u8 = 0xa0;
 }
