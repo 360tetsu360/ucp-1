@@ -2,6 +2,8 @@ use std::{io::Write, net::SocketAddr};
 
 use packet_derive::*;
 
+const UDP_HEADER_LEN : u16 = 32;
+
 pub(crate) trait SystemPacket: Den {
     const ID: u8;
 }
@@ -64,19 +66,19 @@ impl Den for OpenConnectionRequest1 {
         Ok(Self {
             magic: MAGIC::decode(bytes)?,
             protocol_version: u8::decode(bytes)?,
-            mtu_size: bytes.get_ref().len() as u16 + 32, //udp header
+            mtu_size: bytes.get_ref().len() as u16 + UDP_HEADER_LEN, //udp header
         })
     }
 
     fn encode(&self, bytes: &mut CursorWriter) -> std::io::Result<()> {
         MAGIC::encode(&self.magic, bytes)?;
         u8::encode(&self.protocol_version, bytes)?;
-        let null_padding = vec![0u8; (self.mtu_size - 50) as usize]; //32(udp header) + 18(raknet data)
+        let null_padding = vec![0u8; (self.mtu_size - UDP_HEADER_LEN - 18) as usize]; //32(udp header) + 18(raknet data)
         bytes.write_all(&null_padding)
     }
 
     fn size(&self) -> usize {
-        (self.mtu_size - 32) as usize
+        (self.mtu_size - UDP_HEADER_LEN) as usize
     }
 }
 impl SystemPacket for OpenConnectionRequest1 {
@@ -130,22 +132,72 @@ impl SystemPacket for ConnectionRequest {
     const ID: u8 = 0x9;
 }
 
-#[derive(Den)]
 pub struct ConnectionRequestAccepted {
     pub client_address: SocketAddr,
     pub system_index: u16,
     pub request_timestamp: u64,
     pub accepted_timestamp: u64,
 }
+impl Den for ConnectionRequestAccepted {
+    fn decode(bytes: &mut CursorReader) -> std::io::Result<Self> {
+        let client_address = SocketAddr::decode(bytes)?;
+        let system_index = Big::decode(bytes)?;
+        bytes.set_position(bytes.position() + ((bytes.get_ref().len() - 16) - bytes.position() as usize) as u64);
+        let request_timestamp = Big::decode(bytes)?;
+        let accepted_timestamp = Big::decode(bytes)?;
+        Ok(Self {
+            client_address,
+            system_index,
+            request_timestamp,
+            accepted_timestamp,
+        })
+    }
+
+    fn encode(&self, bytes: &mut CursorWriter) -> std::io::Result<()> {
+        SocketAddr::encode(&self.client_address, bytes)?;
+        Big::encode(&self.system_index, bytes)?;
+        bytes.write_all(&[0x6u8; 10])?;
+        Big::encode(&self.request_timestamp, bytes)?;
+        Big::encode(&self.accepted_timestamp, bytes)?;
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        SocketAddr::size(&self.client_address) + 18 + 10
+    }
+}
 impl SystemPacket for ConnectionRequestAccepted {
     const ID: u8 = 0x10;
 }
 
-#[derive(Den)]
 pub struct NewIncomingConnections {
     pub server_address: SocketAddr,
-    pub request_timestamp: i64,
-    pub accepted_timestamp: i64,
+    pub request_timestamp: u64,
+    pub accepted_timestamp: u64,
+}
+impl Den for NewIncomingConnections {
+    fn decode(bytes: &mut CursorReader) -> std::io::Result<Self> {
+        Ok(Self {
+            server_address: SocketAddr::decode(bytes)?,
+            request_timestamp: {
+                bytes.set_position(bytes.position() + ((bytes.get_ref().len() - 16) - bytes.position() as usize) as u64);
+                Big::decode(bytes)?
+            },
+            accepted_timestamp: Big::decode(bytes)?,
+        })
+    }
+
+    fn encode(&self, bytes: &mut CursorWriter) -> std::io::Result<()> {
+        SocketAddr::encode(&self.server_address, bytes)?;
+        bytes.write_all(&[0x6u8; 10])?;
+        Big::encode(&self.request_timestamp, bytes)?;
+        Big::encode(&self.accepted_timestamp, bytes)?;
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        SocketAddr::size(&self.server_address) + 16 + 10
+    }
 }
 impl SystemPacket for NewIncomingConnections {
     const ID: u8 = 0x13;
@@ -187,7 +239,7 @@ pub struct Acknowledge {
 }
 impl Den for Acknowledge {
     fn decode(bytes: &mut CursorReader) -> std::io::Result<Self> {
-        let record_count = u16::decode(bytes)?;
+        let record_count = Big::decode(bytes)?;
         let max_equals_min = bool::decode(bytes)?;
         let sequences;
         let sequence = U24::decode(bytes)?;
@@ -205,7 +257,7 @@ impl Den for Acknowledge {
     }
 
     fn encode(&self, bytes: &mut CursorWriter) -> std::io::Result<()> {
-        u16::encode(&self.record_count, bytes)?;
+        Big::encode(&self.record_count, bytes)?;
         bool::encode(&self.max_equals_min, bytes)?;
         U24::encode(&self.sequences.0, bytes)?;
         if !self.max_equals_min {
