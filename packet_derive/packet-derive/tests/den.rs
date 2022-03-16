@@ -1,30 +1,30 @@
 use packet_derive::*;
 
-#[derive(Debug,PartialEq,Den)]
+#[derive(Debug, PartialEq, Den)]
 struct Hoge {
-    u8 : u8,
-    i8 : i8,
+    u8: u8,
+    i8: i8,
     #[den(with = "Big")]
-    u16 : u16,
-    u16_le : u16,
+    u16: u16,
+    u16_le: u16,
     #[den(with = "Big")]
-    i16 : i16,
-    i16_le : i16,
+    i16: i16,
+    i16_le: i16,
     #[den(with = "Big")]
-    u32 : u32,
-    u32_le : u32,
+    u32: u32,
+    u32_le: u32,
     #[den(with = "Big")]
-    i32 : i32,
-    i32_le : i32,
+    i32: i32,
+    i32_le: i32,
     #[den(with = "Big")]
-    u64 : u64,
-    u64_le : u64,
+    u64: u64,
+    u64_le: u64,
     #[den(with = "Big")]
-    i64 : i64,
-    i64_le : i64,
-    bool : bool,
+    i64: i64,
+    i64_le: i64,
+    bool: bool,
     #[den(with = "U24")]
-    u24 : u32,
+    u24: u32,
 }
 
 #[test]
@@ -45,17 +45,16 @@ fn den() {
         i64: -0x8,
         i64_le: -0x800000000000000,
         bool: false,
-        u24 : 0xF00000,
+        u24: 0xF00000,
     };
 
-
     let mut dst = vec![];
-    let mut bytes : CursorWriter = std::io::Cursor::new(&mut dst);
+    let mut bytes: CursorWriter = std::io::Cursor::new(&mut dst);
     hoge.encode(&mut bytes).unwrap();
     let encoded = bytes.into_inner();
-    assert_eq!(hoge.size(),encoded.len());
+    assert_eq!(hoge.size(), encoded.len());
 
     let mut cursor = std::io::Cursor::new(&encoded as &[u8]);
     let hoge2 = Hoge::decode(&mut cursor).unwrap();
-    assert_eq!(hoge,hoge2)
+    assert_eq!(hoge, hoge2)
 }

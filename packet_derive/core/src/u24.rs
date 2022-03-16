@@ -1,6 +1,6 @@
+use crate::{CursorWriter, DenWith};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::Result;
-use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
-use crate::{DenWith, CursorWriter};
 
 pub struct U24;
 

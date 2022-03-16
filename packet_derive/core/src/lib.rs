@@ -20,7 +20,6 @@ pub use big_endian::*;
 pub use little_endian::*;
 pub use u24::*;
 
-
 pub trait Den {
     fn decode(bytes: &mut CursorReader) -> Result<Self>
     where
@@ -33,7 +32,7 @@ pub trait DenWith<T> {
     fn decode(bytes: &mut CursorReader) -> Result<T>
     where
         T: Sized;
-    fn encode(v: &T, bytes: &mut CursorWriter)-> Result<()>;
+    fn encode(v: &T, bytes: &mut CursorWriter) -> Result<()>;
     fn size(v: &T) -> usize;
 }
 
@@ -66,7 +65,7 @@ impl Den for i8 {
 }
 
 impl Den for bool {
-    fn decode(bytes: &mut CursorReader) -> Result<Self>{
+    fn decode(bytes: &mut CursorReader) -> Result<Self> {
         Ok(bytes.read_u8()? != 0)
     }
 
@@ -80,13 +79,16 @@ impl Den for bool {
 }
 
 impl Den for String {
-    fn decode(bytes: &mut CursorReader) -> Result<Self>{
+    fn decode(bytes: &mut CursorReader) -> Result<Self> {
         let length = bytes.read_u16::<BigEndian>()?;
-        let mut raw_str = vec![0u8;length as usize];
+        let mut raw_str = vec![0u8; length as usize];
         bytes.read_exact(&mut raw_str)?;
         match String::from_utf8(raw_str) {
             Ok(p) => Ok(p),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other,e.to_string())),
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )),
         }
     }
 
@@ -103,7 +105,6 @@ impl Den for String {
 impl Den for SocketAddr {
     fn decode(bytes: &mut CursorReader) -> Result<Self> {
         let ip_ver = bytes.read_u8()?;
-
         if ip_ver == 4 {
             let ip = Ipv4Addr::new(
                 0xff - bytes.read_u8()?,
@@ -153,11 +154,11 @@ pub struct MAGIC;
 
 impl DenWith<()> for MAGIC {
     fn decode(bytes: &mut CursorReader) -> Result<()> {
-        let mut dst = [0u8;16];
+        let mut dst = [0u8; 16];
         bytes.read_exact(&mut dst)
     }
 
-    fn encode(_: &(), bytes: &mut CursorWriter)-> Result<()> {
+    fn encode(_: &(), bytes: &mut CursorWriter) -> Result<()> {
         bytes.write_all(&OFFLINE_DATA[..])
     }
 

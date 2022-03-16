@@ -1,4 +1,4 @@
-use crate::{DenWith, CursorWriter};
+use crate::{CursorWriter, DenWith};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Result};
 

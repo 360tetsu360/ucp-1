@@ -1,4 +1,4 @@
-use crate::{Den, CursorWriter};
+use crate::{CursorWriter, Den};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Cursor, Result};
 
@@ -7,7 +7,7 @@ impl Den for u16 {
         bytes.read_u16::<LittleEndian>()
     }
 
-    fn encode(&self, bytes: &mut CursorWriter) -> Result<()>{
+    fn encode(&self, bytes: &mut CursorWriter) -> Result<()> {
         bytes.write_u16::<LittleEndian>(*self)
     }
 
@@ -16,7 +16,7 @@ impl Den for u16 {
     }
 }
 
-impl Den for i16{
+impl Den for i16 {
     fn decode(bytes: &mut Cursor<&[u8]>) -> Result<i16> {
         bytes.read_i16::<LittleEndian>()
     }
