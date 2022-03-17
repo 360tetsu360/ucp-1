@@ -125,8 +125,8 @@ impl SystemPacket for OpenConnectionReply2 {
 #[derive(Den)]
 pub struct ConnectionRequest {
     pub guid: u64,
-    pub time: i64,
-    pub use_encryption: u8,
+    pub time: u64,
+    pub use_encryption: bool,
 }
 impl SystemPacket for ConnectionRequest {
     const ID: u8 = 0x9;

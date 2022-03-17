@@ -1,3 +1,5 @@
+use std::io::{Read, Write};
+
 use packet_derive::*;
 
 use crate::fragment::{FragmentHeader, FRAGMENT_FLAG};
@@ -34,6 +36,9 @@ impl Reliability {
     }
     pub fn sequenced(&self) -> bool {
         matches!(self, Self::UnreliableSequenced | Self::ReliableSequenced)
+    }
+    pub fn ordered(&self) -> bool {
+        matches!(self, Self::ReliableOrdered)
     }
 }
 
@@ -78,15 +83,34 @@ impl<'a> Frame<'a> {
             };
             ret.fragment = Some(header);
         }
-        ret.data = &reader.get_ref()[reader.position() as usize..reader.position() as usize + length];
+        ret.data =
+            &reader.get_ref()[reader.position() as usize..reader.position() as usize + length];
+        reader.set_position(reader.position() + length as u64);
         Ok(ret)
     }
     pub fn encode(&self, bytes: &mut Vec<u8>) -> std::io::Result<()> {
+        let mut writer = CursorWriter::new(bytes);
         let mut flag = (self.reliability as u8) << 5;
         if self.fragment.is_some() {
             flag |= FRAGMENT_FLAG
         }
-
-        todo!()
+        u8::encode(&flag, &mut writer)?;
+        Big::encode(&((self.data.len() * 8) as u16), &mut writer)?;
+        if self.reliability.reliable() {
+            U24::encode(&self.mindex, &mut writer)?;
+        }
+        if self.reliability.sequenced() {
+            U24::encode(&self.sindex, &mut writer)?;
+        }
+        if self.reliability.ordered() {
+            U24::encode(&self.oindex, &mut writer)?;
+            u8::encode(&0, &mut writer)?;
+        }
+        if let Some(fragment) = &self.fragment {
+            Big::encode(&fragment.size, &mut writer)?;
+            Big::encode(&fragment.id, &mut writer)?;
+            Big::encode(&fragment.index, &mut writer)?;
+        }
+        writer.write_all(self.data)
     }
 }

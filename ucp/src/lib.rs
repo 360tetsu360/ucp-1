@@ -1,17 +1,19 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use conn::Conn;
+use packet_derive::*;
 use system_packets::*;
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
     sync::Mutex,
 };
-use packet_derive::*;
 
 pub(crate) mod conn;
 pub(crate) mod fragment;
 pub mod packets;
+pub(crate) mod queue;
 pub(crate) mod system_packets;
+pub(crate) mod time;
 
 pub const PROTOCOL_VERSION: u8 = 0xA;
 
@@ -23,10 +25,10 @@ pub struct UcpSession {
 }
 
 impl UcpSession {
-    pub async fn recv(&self) {
+    pub async fn recv(&self) -> std::io::Result<()> {
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            self.conn.lock().await.update();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.conn.lock().await.update().await?;
         }
     }
 }
@@ -68,15 +70,12 @@ impl UcpListener {
             } else {
                 let mut reader = std::io::Cursor::new(&v[..size]);
                 match u8::decode(&mut reader)? {
-                    UnconnectedPing::ID => {
-                        self.handle_ping(&v[..size], src).await?;
-                    }
-                    OpenConnectionRequest1::ID => {
-                        self.handle_ocrequest1(&v[..size], src).await?;
-                    }
+                    UnconnectedPing::ID => self.handle_ping(&v[..size], src).await?,
+                    OpenConnectionRequest1::ID => self.handle_ocrequest1(&v[..size], src).await?,
                     OpenConnectionRequest2::ID => {
-                        let session = self.handle_ocrequest2(&v[..size], src).await?;
-                        return Ok(UcpSession { conn: session });
+                        return Ok(UcpSession {
+                            conn: self.handle_ocrequest2(&v[..size], src).await?,
+                        })
                     }
                     _ => {}
                 }
@@ -135,7 +134,7 @@ impl UcpListener {
         let mut bytes = vec![];
         encode_syspacket(reply, &mut bytes)?;
         self.socket.send_to(&bytes[..], src).await?;
-        let session = Arc::new(Mutex::new(Conn::new()));
+        let session = Arc::new(Mutex::new(Conn::new(src, self.socket.clone())));
         self.conns.insert(src, session.clone());
         Ok(session)
     }
