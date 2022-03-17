@@ -6,13 +6,14 @@ use tokio::{
     net::{ToSocketAddrs, UdpSocket},
     sync::Mutex,
 };
+use packet_derive::*;
 
 pub(crate) mod conn;
 pub(crate) mod fragment;
 pub mod packets;
 pub(crate) mod system_packets;
 
-pub const PROTOCOL_VERSION : u8 = 0xA;
+pub const PROTOCOL_VERSION: u8 = 0xA;
 
 type Udp = Arc<UdpSocket>;
 type Session = Arc<Mutex<Conn>>;
@@ -56,29 +57,28 @@ impl UcpListener {
         loop {
             let mut v = [0u8; 2048];
             let (size, src) = self.socket.recv_from(&mut v).await?;
-            if size > 0 {
-                if self.conns.contains_key(&src) {
-                    self.conns
-                        .get(&src)
-                        .unwrap()
-                        .lock()
-                        .await
-                        .handle(&v[..size]);
-                } else {
-                    match v[0] {
-                        UnconnectedPing::ID => {
-                            self.handle_ping(&v[..size], src).await?;
-                        }
-                        OpenConnectionRequest1::ID => {
-                            self.handle_ocrequest1(&v[..size], src).await?;
-                        }
-                        OpenConnectionRequest2::ID => {
-                            let session =
-                                self.handle_ocrequest2(&v[..size], src).await?;
-                            return Ok(UcpSession { conn: session });
-                        }
-                        _ => {}
+            if self.conns.contains_key(&src) {
+                self.conns
+                    .get(&src)
+                    .unwrap()
+                    .lock()
+                    .await
+                    .handle(&v[..size])
+                    .await?;
+            } else {
+                let mut reader = std::io::Cursor::new(&v[..size]);
+                match u8::decode(&mut reader)? {
+                    UnconnectedPing::ID => {
+                        self.handle_ping(&v[..size], src).await?;
                     }
+                    OpenConnectionRequest1::ID => {
+                        self.handle_ocrequest1(&v[..size], src).await?;
+                    }
+                    OpenConnectionRequest2::ID => {
+                        let session = self.handle_ocrequest2(&v[..size], src).await?;
+                        return Ok(UcpSession { conn: session });
+                    }
+                    _ => {}
                 }
             }
         }
@@ -98,18 +98,18 @@ impl UcpListener {
         Ok(())
     }
 
-    async fn handle_ocrequest1(
-        &self,
-        v: &[u8],
-        src: SocketAddr,
-    ) -> std::io::Result<()> {
+    async fn handle_ocrequest1(&self, v: &[u8], src: SocketAddr) -> std::io::Result<()> {
         let packet: OpenConnectionRequest1 = decode_syspacket(v)?;
         if packet.protocol_version != PROTOCOL_VERSION {
-            let reply = IncompatibleProtocolVersion{ server_protocol: PROTOCOL_VERSION, magic: (), server_guid: self.guid };
+            let reply = IncompatibleProtocolVersion {
+                server_protocol: PROTOCOL_VERSION,
+                magic: (),
+                server_guid: self.guid,
+            };
             let mut bytes = vec![];
             encode_syspacket(reply, &mut bytes)?;
             self.socket.send_to(&bytes[..], src).await?;
-            return Ok(())
+            return Ok(());
         }
         let reply = OpenConnectionReply1 {
             magic: (),
@@ -123,11 +123,7 @@ impl UcpListener {
         Ok(())
     }
 
-    async fn handle_ocrequest2(
-        &mut self,
-        v: &[u8],
-        src: SocketAddr,
-    ) -> std::io::Result<Session> {
+    async fn handle_ocrequest2(&mut self, v: &[u8], src: SocketAddr) -> std::io::Result<Session> {
         let packet: OpenConnectionRequest2 = decode_syspacket(v)?;
         let reply = OpenConnectionReply2 {
             magic: (),

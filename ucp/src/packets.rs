@@ -37,55 +37,48 @@ impl Reliability {
     }
 }
 
-pub(crate) struct Frame {
+pub(crate) struct Frame<'a> {
     pub reliability: Reliability,
     pub fragment: Option<FragmentHeader>, //only if fragmented
     pub mindex: u32,                      //reliable frame index
     pub sindex: u32,                      //sequenced frame index
     pub oindex: u32,                      //ordered frame index
-    pub data: Vec<u8>,
+    pub data: &'a [u8],
 }
 
-impl Default for Frame {
-    fn default() -> Self {
-        Self {
+impl<'a> Frame<'a> {
+    pub fn decode(reader: &mut std::io::Cursor<&'a [u8]>) -> std::io::Result<Self> {
+        let mut ret = Self {
             reliability: Reliability::Unreliable,
             fragment: None,
             mindex: 0,
             sindex: 0,
             oindex: 0,
-            data: vec![],
-        }
-    }
-}
-
-impl Frame {
-    pub fn decode(bytes: &[u8]) -> std::io::Result<Self> {
-        let mut ret = Self::default();
-        let mut reader = CursorReader::new(bytes);
-        let flag = u8::decode(&mut reader)?;
+            data: reader.get_ref(),
+        };
+        let flag = u8::decode(reader)?;
         let fragment = (flag & FRAGMENT_FLAG) != 0;
         let reliability = Reliability::from_u8((flag & 224) >> 5)?;
-        let length = (u16::decode(&mut reader)? / 8) as usize;
+        let length = (<Big as DenWith<u16>>::decode(reader)? / 8) as usize;
         if reliability.reliable() {
-            ret.mindex = U24::decode(&mut reader)?;
+            ret.mindex = U24::decode(reader)?;
         }
         if reliability.sequenced() {
-            ret.sindex = U24::decode(&mut reader)?;
+            ret.sindex = U24::decode(reader)?;
         }
         if let Reliability::ReliableOrdered = reliability {
-            ret.oindex = U24::decode(&mut reader)?;
+            ret.oindex = U24::decode(reader)?;
             reader.set_position(reader.position() + 1);
         }
         if fragment {
             let header = FragmentHeader {
-                size: u32::decode(&mut reader)?,
-                id: u16::decode(&mut reader)?,
-                index: u32::decode(&mut reader)?,
+                size: Big::decode(reader)?,
+                id: Big::decode(reader)?,
+                index: Big::decode(reader)?,
             };
             ret.fragment = Some(header);
         }
-        ret.data = bytes[reader.position() as usize..reader.position() as usize + length].to_vec();
+        ret.data = &reader.get_ref()[reader.position() as usize..reader.position() as usize + length];
         Ok(ret)
     }
     pub fn encode(&self, bytes: &mut Vec<u8>) -> std::io::Result<()> {

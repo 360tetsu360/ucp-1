@@ -2,20 +2,20 @@ use std::{io::Write, net::SocketAddr};
 
 use packet_derive::*;
 
-const UDP_HEADER_LEN : u16 = 32;
+const UDP_HEADER_LEN: u16 = 32;
 
 pub(crate) trait SystemPacket: Den {
     const ID: u8;
 }
 
 pub(crate) fn decode_syspacket<T: SystemPacket>(bytes: &[u8]) -> std::io::Result<T> {
-    if bytes[0] != T::ID {
+    let mut reader = CursorReader::new(bytes);
+    if u8::decode(&mut reader)? != T::ID {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "Wrong ID".to_string(),
         ));
     }
-    let mut reader = CursorReader::new(&bytes[1..]);
     T::decode(&mut reader)
 }
 
@@ -24,7 +24,7 @@ pub(crate) fn encode_syspacket<T: SystemPacket>(
     dst: &mut Vec<u8>,
 ) -> std::io::Result<()> {
     let mut writer = CursorWriter::new(dst);
-    writer.write_all(&[T::ID; 1])?;
+    u8::encode(&T::ID, &mut writer)?;
     packet.encode(&mut writer)
 }
 
@@ -142,7 +142,9 @@ impl Den for ConnectionRequestAccepted {
     fn decode(bytes: &mut CursorReader) -> std::io::Result<Self> {
         let client_address = SocketAddr::decode(bytes)?;
         let system_index = Big::decode(bytes)?;
-        bytes.set_position(bytes.position() + ((bytes.get_ref().len() - 16) - bytes.position() as usize) as u64);
+        bytes.set_position(
+            bytes.position() + ((bytes.get_ref().len() - 16) - bytes.position() as usize) as u64,
+        );
         let request_timestamp = Big::decode(bytes)?;
         let accepted_timestamp = Big::decode(bytes)?;
         Ok(Self {
@@ -180,7 +182,10 @@ impl Den for NewIncomingConnections {
         Ok(Self {
             server_address: SocketAddr::decode(bytes)?,
             request_timestamp: {
-                bytes.set_position(bytes.position() + ((bytes.get_ref().len() - 16) - bytes.position() as usize) as u64);
+                bytes.set_position(
+                    bytes.position()
+                        + ((bytes.get_ref().len() - 16) - bytes.position() as usize) as u64,
+                );
                 Big::decode(bytes)?
             },
             accepted_timestamp: Big::decode(bytes)?,
