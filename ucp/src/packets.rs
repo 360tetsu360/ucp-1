@@ -1,5 +1,3 @@
-use std::io::{Read, Write};
-
 use packet_derive::*;
 
 use crate::fragment::{FragmentHeader, FRAGMENT_FLAG};
@@ -42,29 +40,29 @@ impl Reliability {
     }
 }
 
-pub(crate) struct Frame<'a> {
+pub(crate) struct Frame {
     pub reliability: Reliability,
-    pub fragment: Option<FragmentHeader>, //only if fragmented
+    pub length: u16,
     pub mindex: u32,                      //reliable frame index
     pub sindex: u32,                      //sequenced frame index
     pub oindex: u32,                      //ordered frame index
-    pub data: &'a [u8],
+    pub fragment: Option<FragmentHeader>, //only if fragmented
 }
 
-impl<'a> Frame<'a> {
-    pub fn decode(reader: &mut std::io::Cursor<&'a [u8]>) -> std::io::Result<Self> {
+impl Frame {
+    pub fn decode(reader: &mut std::io::Cursor<&[u8]>) -> std::io::Result<Self> {
         let mut ret = Self {
             reliability: Reliability::Unreliable,
-            fragment: None,
+            length: 0,
             mindex: 0,
             sindex: 0,
             oindex: 0,
-            data: reader.get_ref(),
+            fragment: None,
         };
         let flag = u8::decode(reader)?;
         let fragment = (flag & FRAGMENT_FLAG) != 0;
         let reliability = Reliability::from_u8((flag & 224) >> 5)?;
-        let length = (<Big as DenWith<u16>>::decode(reader)? / 8) as usize;
+        ret.length = <Big as DenWith<u16>>::decode(reader)? / 8;
         if reliability.reliable() {
             ret.mindex = U24::decode(reader)?;
         }
@@ -83,9 +81,6 @@ impl<'a> Frame<'a> {
             };
             ret.fragment = Some(header);
         }
-        ret.data =
-            &reader.get_ref()[reader.position() as usize..reader.position() as usize + length];
-        reader.set_position(reader.position() + length as u64);
         Ok(ret)
     }
     pub fn encode(&self, bytes: &mut Vec<u8>) -> std::io::Result<()> {
@@ -95,7 +90,7 @@ impl<'a> Frame<'a> {
             flag |= FRAGMENT_FLAG
         }
         u8::encode(&flag, &mut writer)?;
-        Big::encode(&((self.data.len() * 8) as u16), &mut writer)?;
+        Big::encode(&((self.length * 8) as u16), &mut writer)?;
         if self.reliability.reliable() {
             U24::encode(&self.mindex, &mut writer)?;
         }
@@ -111,6 +106,24 @@ impl<'a> Frame<'a> {
             Big::encode(&fragment.id, &mut writer)?;
             Big::encode(&fragment.index, &mut writer)?;
         }
-        writer.write_all(self.data)
+        Ok(())
+    }
+    pub fn size(&self) -> usize {
+        let mut ret = 1 + 2;// reliability flag + length(octet)
+        if self.reliability.reliable() {
+            ret += 3;
+        }
+        if self.reliability.sequenced() {
+            ret += 3;
+        }
+        if self.reliability.ordered() {
+            ret += 4;
+        }
+        if self.fragment.is_some() {
+            ret += 4;
+            ret += 2;
+            ret += 4;
+        }
+        ret
     }
 }

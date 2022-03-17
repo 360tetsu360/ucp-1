@@ -3,7 +3,7 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 
 use crate::packets::*;
-use crate::queue::ReceiveQueue;
+use crate::receive::ReceiveQueue;
 use crate::system_packets::*;
 use crate::time::get_time;
 use crate::Udp;
@@ -46,7 +46,10 @@ impl Conn {
         self.receive.received(sequence);
         while reader.position() < bytes.len() as u64 {
             let frame = Frame::decode(&mut reader)?;
-            self.handle_packet(frame).await?;
+            let data = &reader.get_ref()
+                [reader.position() as usize..reader.position() as usize + frame.length as usize];
+            reader.set_position(reader.position() + frame.length as usize as u64);
+            self.handle_packet(frame, data).await?;
         }
         Ok(())
     }
@@ -58,15 +61,15 @@ impl Conn {
         let nack: Nack = decode_syspacket(bytes)?;
         Ok(())
     }
-    async fn handle_packet(&mut self, frame: Frame<'_>) -> std::io::Result<()> {
+    async fn handle_packet(&mut self, frame: Frame, bytes: &[u8]) -> std::io::Result<()> {
         if frame.fragment.is_some() {
-            if let Some(data) = self.receive.fragmented(frame) {
+            if let Some(data) = self.receive.fragmented(frame, bytes) {
                 self.handle_incoming_packet(&data[..]).await?;
             }
         } else if !frame.reliability.sequenced() && !frame.reliability.ordered() {
-            self.handle_incoming_packet(frame.data).await?;
+            self.handle_incoming_packet(bytes).await?;
         } else {
-            self.receive.ordered(frame);
+            self.receive.ordered(frame, bytes);
             while let Some(data) = self.receive.next_ordered() {
                 self.handle_incoming_packet(&data[..]).await?;
             }

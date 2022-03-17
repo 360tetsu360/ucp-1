@@ -11,7 +11,8 @@ use tokio::{
 pub(crate) mod conn;
 pub(crate) mod fragment;
 pub mod packets;
-pub(crate) mod queue;
+pub(crate) mod receive;
+pub(crate) mod send;
 pub(crate) mod system_packets;
 pub(crate) mod time;
 
