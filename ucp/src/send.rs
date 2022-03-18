@@ -1,16 +1,21 @@
-use std::collections::{VecDeque, HashMap};
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
-use packet_derive::{U24, DenWith};
+use packet_derive::{DenWith, U24};
 
-use crate::Udp;
 use crate::fragment::FragmentHeader;
 use crate::system_packets::UDP_HEADER_LEN;
+use crate::Udp;
 use crate::{
     packets::{Frame, Reliability},
     system_packets::{Ack, Nack},
 };
+
+const MAX_RTO: Duration = Duration::from_secs(60);
+const MIN_RTO: Duration = Duration::from_secs(1);
+
+type Rtts = (Duration, Duration); // srtt,rttvar
 
 pub(crate) struct OutPacket {
     pub frame: Frame,
@@ -19,69 +24,112 @@ pub(crate) struct OutPacket {
 
 impl OutPacket {
     pub fn length(&self) -> usize {
-        self.frame.length as usize + Frame::size(self.frame.reliability, self.frame.fragment.is_some())
+        self.frame.length as usize
+            + Frame::size(self.frame.reliability, self.frame.fragment.is_some())
     }
     pub fn encode(&self) -> std::io::Result<Vec<u8>> {
         let mut frame_bytes = vec![];
         self.frame.encode(&mut frame_bytes)?;
-        Ok([frame_bytes,self.data.clone()].concat()) // Fix : don't clone
+        Ok([frame_bytes, self.data.clone()].concat()) // Fix : don't clone
     }
 }
 
 pub(crate) struct SendQueue {
-    udp : Udp,
-    addr : SocketAddr,
+    udp: Udp,
+    addr: SocketAddr,
 
     buffer: VecDeque<OutPacket>,
+    resend: VecDeque<OutPacket>,
     sequence: u32,
-    mindex : u32,
-    oindex : u32,
-    sindex : u32,
-    fragment_id : u16,
+    mindex: u32,
+    oindex: u32,
+    sindex: u32,
+    fragment_id: u16,
 
-    mtu : usize,
+    mtu: usize,
 
-    window_size : usize,
+    window_size: usize,
 
-    rto : Duration,
+    rto: Duration,
+    rtts: Option<Rtts>,
 
-    sent : HashMap<u32,(Vec<OutPacket>,Instant)>,
+    sent: HashMap<u32, (Vec<OutPacket>, Instant)>,
 }
 
 impl SendQueue {
-    pub fn new(udp : Udp,addr : SocketAddr,mtu : usize) -> Self {
+    pub fn new(udp: Udp, addr: SocketAddr, mtu: usize) -> Self {
         Self {
             udp,
             addr,
             buffer: VecDeque::new(),
+            resend: VecDeque::new(),
             sequence: 0,
-            mindex : 0,
-            oindex : 0,
-            sindex : 0,
-            fragment_id : 0,
+            mindex: 0,
+            oindex: 0,
+            sindex: 0,
+            fragment_id: 0,
             mtu,
-            window_size : 1,
-            rto : Duration::from_secs(6),
-            sent : HashMap::new()
+            window_size: 1,
+            rto: Duration::from_secs(1),
+            rtts: None,
+            sent: HashMap::new(),
         }
     }
 
     pub fn ack(&mut self, ack: Ack) {
         let now = Instant::now();
+
         for i in ack.ack.sequences.0..ack.ack.sequences.1 + 1 {
             if self.sent.contains_key(&i) {
-                let sent_time = self.sent.remove(&i).unwrap().1;
+                if i == ack.ack.sequences.1 {
+                    let sent_time = self.sent.remove(&i).unwrap().1;
+                    let rtt = now.duration_since(sent_time);
+                    self.compute_rto(rtt);
+                } else {
+                    self.sent.remove(&i);
+                }
             }
         }
     }
 
-    pub fn nack(&mut self, nack: Nack) {}
-
-    fn resend(&mut self) {
-
+    pub fn nack(&mut self, nack: Nack) {
+        for i in nack.nack.sequences.0..nack.nack.sequences.1 + 1 {
+            self.resend(i);
+        }
     }
 
-    fn send_out_packet(&mut self,packet : OutPacket) {
+    fn compute_rto(&mut self, rtt: Duration) {
+        if let Some((srtt, rttvar)) = self.rtts {
+            let new_rttvar = rttvar.mul_f32(0.75) + absolute_div(srtt, rtt).mul_f32(0.25);
+            let new_srtt = srtt.mul_f32(0.875) + rtt.mul_f32(0.125);
+            let mut rto = srtt + 4 * rttvar;
+            if rto > MAX_RTO {
+                rto = MAX_RTO;
+            }
+            if rto < MIN_RTO {
+                rto = MIN_RTO;
+            }
+            self.rto = rto;
+            self.rtts = Some((new_srtt, new_rttvar));
+        } else {
+            let srtt = rtt;
+            let rttvar = rtt / 2;
+            self.rto = srtt + 4 * rttvar;
+            self.rtts = Some((srtt, rttvar));
+        }
+    }
+
+    fn resend(&mut self, seq: u32) {
+        if let Some((set, _)) = self.sent.remove(&seq) {
+            for packet in set {
+                if packet.frame.reliability.reliable() {
+                    self.resend.push_back(packet);
+                }
+            }
+        }
+    }
+
+    fn send_out_packet(&mut self, packet: OutPacket) {
         self.buffer.push_back(packet);
     }
 
@@ -92,14 +140,14 @@ impl SendQueue {
             mindex: 0,
             sindex: 0,
             oindex: 0,
-            fragment : None
+            fragment: None,
         };
         if reliability.reliable() {
             frame.mindex = self.mindex;
             self.mindex += 1;
         }
         if reliability.sequenced() {
-            frame.sindex = self.sequence;
+            frame.sindex = self.sindex;
             self.sindex += 1;
         }
         if reliability.ordered() {
@@ -109,7 +157,7 @@ impl SendQueue {
         self.send_out_packet(OutPacket { frame, data: bytes })
     }
 
-    pub fn send_ref(&mut self,bytes : &[u8],mut reliability: Reliability) {
+    pub fn send_ref(&mut self, bytes: &[u8], mut reliability: Reliability) {
         if bytes.len() > self.mtu - UDP_HEADER_LEN as usize - 1 - Frame::size(reliability, false) {
             match reliability {
                 Reliability::Unreliable => reliability = Reliability::Reliable,
@@ -130,7 +178,7 @@ impl SendQueue {
                     length = m;
                 }
 
-                let header = FragmentHeader{
+                let header = FragmentHeader {
                     size: count as u32,
                     id: self.fragment_id,
                     index: i as u32,
@@ -146,7 +194,10 @@ impl SendQueue {
                 self.mindex += 1;
 
                 let pos = i * payload_size;
-                self.send_out_packet(OutPacket { frame, data: bytes[pos..pos + length].to_vec() });
+                self.send_out_packet(OutPacket {
+                    frame,
+                    data: bytes[pos..pos + length].to_vec(),
+                });
             }
             self.fragment_id += 1;
             if reliability.ordered() {
@@ -160,22 +211,35 @@ impl SendQueue {
     }
 
     pub async fn tick(&mut self) -> std::io::Result<()> {
+        self.check_timout();
         let max_payload_len = self.mtu - UDP_HEADER_LEN as usize;
         let mut break_flag = false;
         for _ in 0..self.window_size {
             let mut packets = vec![];
             let mut length = 0;
-            loop {
+            loop { 
+                //////////////////////////////////////////////////////////////////////////////////////
+                if self.resend.front().is_some() {
+                    let packet = self.resend.front().unwrap();
+                    let packet_len = packet.length();
+                    if packet_len + length < max_payload_len {
+                        packets.push(self.resend.pop_front().unwrap());
+                        length += packet_len;
+                    } else {
+                        break;
+                    }
+                }
+                //////////////////////////////////////////////////////////////////////////////////////
                 if self.buffer.front().is_some() {
                     let packet = self.buffer.front().unwrap();
                     let packet_len = packet.length();
                     if packet_len + length < max_payload_len {
                         packets.push(self.buffer.pop_front().unwrap());
                         length += packet_len;
-                    }else {
+                    } else {
                         break;
                     }
-                }else {
+                } else {
                     break_flag = true;
                     break;
                 }
@@ -188,9 +252,9 @@ impl SendQueue {
                 buff.append(&mut packet.encode()?);
             }
             self.udp.send_to(&buff, self.addr).await?;
-            
 
-            self.sent.insert(self.sequence, (packets,Instant::now()));
+            self.sent.insert(self.sequence, (packets, Instant::now()));
+            self.sequence += 1;
 
             if break_flag {
                 break;
@@ -199,7 +263,28 @@ impl SendQueue {
         Ok(())
     }
 
+    fn check_timout(&mut self) {
+        let now = Instant::now();
+        let resends: Vec<u32> = self
+            .sent
+            .iter()
+            .filter(|x| now.duration_since(x.1 .1) > self.rto)
+            .map(|x| *x.0)
+            .collect();
+        for seq in resends {
+            self.resend(seq);
+        }
+    }
+
     pub fn get(&mut self) -> Option<Vec<u8>> {
         todo!()
+    }
+}
+
+fn absolute_div(p: Duration, o: Duration) -> Duration {
+    if p > o {
+        p - o
+    } else {
+        o - p
     }
 }

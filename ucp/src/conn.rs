@@ -22,12 +22,12 @@ pub(crate) struct Conn {
 }
 
 impl Conn {
-    pub fn new(addr: SocketAddr, mtu : usize, socket: Udp) -> Self {
+    pub fn new(addr: SocketAddr, mtu: usize, socket: Udp) -> Self {
         Self {
-            addr: addr.clone(),
+            addr,
             socket: socket.clone(),
             receive: ReceiveQueue::new(),
-            send: SendQueue::new(socket,addr,mtu),
+            send: SendQueue::new(socket, addr, mtu),
             unhandled: VecDeque::new(),
         }
     }

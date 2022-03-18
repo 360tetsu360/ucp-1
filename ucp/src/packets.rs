@@ -108,7 +108,7 @@ impl Frame {
         }
         Ok(())
     }
-    pub fn size(reliability : Reliability,fragment : bool) -> usize {
+    pub fn size(reliability: Reliability, fragment: bool) -> usize {
         let mut ret = 1 + 2; // reliability flag + length(octet)
         if reliability.reliable() {
             ret += 3;
