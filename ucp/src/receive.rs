@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap};
 
 use crate::packets::Frame;
 
@@ -68,7 +68,7 @@ impl ReceiveQueue {
 
     pub fn fragmented(&mut self, frame: Frame, bytes: &[u8]) -> Option<Vec<u8>> {
         if let Some(fragment) = frame.fragment {
-            if let std::collections::hash_map::Entry::Vacant(e) = self.fragment.entry(fragment.id) {
+            if let Entry::Vacant(e) = self.fragment.entry(fragment.id) {
                 let mut bmap = BTreeMap::new();
                 bmap.insert(fragment.index, bytes.to_vec());
                 e.insert((fragment.size, bmap));
@@ -110,7 +110,7 @@ impl ReceiveQueue {
             self.ordered_next = first + 1;
             return self.ordered.remove(&first);
         }
-        return None;
+        None
     }
 }
 

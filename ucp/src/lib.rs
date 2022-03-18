@@ -2,6 +2,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use conn::Conn;
 use packet_derive::*;
+use packets::Reliability;
 use system_packets::*;
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
@@ -26,11 +27,17 @@ pub struct UcpSession {
 }
 
 impl UcpSession {
-    pub async fn recv(&self) -> std::io::Result<()> {
+    pub async fn recv(&self) -> std::io::Result<Vec<u8>> {
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            self.conn.lock().await.update().await?;
+            if let Some(packet) = self.conn.lock().await.receive() {
+                return Ok(packet);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            self.conn.lock().await.update().await?
         }
+    }
+    pub async fn send(&self, bytes: Vec<u8>, reliability: Reliability) -> std::io::Result<()> {
+        self.conn.lock().await.send(bytes, reliability)
     }
 }
 
@@ -66,8 +73,7 @@ impl UcpListener {
                     .unwrap()
                     .lock()
                     .await
-                    .handle(&v[..size])
-                    .await?;
+                    .handle(&v[..size])?;
             } else {
                 let mut reader = std::io::Cursor::new(&v[..size]);
                 match u8::decode(&mut reader)? {

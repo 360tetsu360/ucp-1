@@ -1,11 +1,12 @@
 use packet_derive::*;
+use std::collections::VecDeque;
 use std::io::Cursor;
 use std::net::SocketAddr;
 
 use crate::packets::*;
 use crate::receive::ReceiveQueue;
+use crate::send::SendQueue;
 use crate::system_packets::*;
-use crate::time::get_time;
 use crate::Udp;
 
 const DATAGRAM_FLAG: u8 = 0x80;
@@ -16,6 +17,8 @@ pub struct Conn {
     addr: SocketAddr,
     socket: Udp,
     receive: ReceiveQueue,
+    send: SendQueue,
+    unhandled: VecDeque<Vec<u8>>,
 }
 
 impl Conn {
@@ -24,10 +27,12 @@ impl Conn {
             addr,
             socket,
             receive: ReceiveQueue::new(),
+            send: SendQueue::new(),
+            unhandled: VecDeque::new(),
         }
     }
 
-    pub async fn handle(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    pub fn handle(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let mut reader = Cursor::new(bytes);
         let id = u8::decode(&mut reader)?;
 
@@ -36,11 +41,11 @@ impl Conn {
         } else if id & NACK_FLAG != 0 {
             self.handle_nack(bytes)?;
         } else if id & DATAGRAM_FLAG != 0 {
-            self.handle_datagram(&bytes[1..]).await?;
+            self.handle_datagram(&bytes[1..])?;
         }
         Ok(())
     }
-    async fn handle_datagram(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    fn handle_datagram(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let mut reader = Cursor::new(bytes);
         let sequence = U24::decode(&mut reader)?;
         self.receive.received(sequence);
@@ -49,54 +54,43 @@ impl Conn {
             let data = &reader.get_ref()
                 [reader.position() as usize..reader.position() as usize + frame.length as usize];
             reader.set_position(reader.position() + frame.length as usize as u64);
-            self.handle_packet(frame, data).await?;
+            self.handle_packet(frame, data)?;
         }
         Ok(())
     }
     fn handle_ack(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let ack: Ack = decode_syspacket(bytes)?;
+        self.send.ack(ack);
         Ok(())
     }
     fn handle_nack(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let nack: Nack = decode_syspacket(bytes)?;
+        self.send.nack(nack);
         Ok(())
     }
-    async fn handle_packet(&mut self, frame: Frame, bytes: &[u8]) -> std::io::Result<()> {
+    fn handle_packet(&mut self, frame: Frame, bytes: &[u8]) -> std::io::Result<()> {
         if frame.fragment.is_some() {
             if let Some(data) = self.receive.fragmented(frame, bytes) {
-                self.handle_incoming_packet(&data[..]).await?;
+                self.handle_incoming_packet(data)?;
             }
         } else if !frame.reliability.sequenced() && !frame.reliability.ordered() {
-            self.handle_incoming_packet(bytes).await?;
+            self.handle_incoming_packet(bytes.to_vec())?;
         } else {
             self.receive.ordered(frame, bytes);
             while let Some(data) = self.receive.next_ordered() {
-                self.handle_incoming_packet(&data[..]).await?;
+                self.handle_incoming_packet(data)?;
             }
         }
         Ok(())
     }
-    async fn handle_incoming_packet(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        let mut reader = std::io::Cursor::new(bytes);
-        match u8::decode(&mut reader)? {
-            ConnectionRequest::ID => self.handle_connection_request(bytes).await?,
-            _ => {}
-        }
-        Ok(())
-    }
-    async fn handle_connection_request(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        let connection_request: ConnectionRequest = decode_syspacket(bytes)?;
-        if connection_request.use_encryption {
-            todo!();
-        }
 
-        let accepted = ConnectionRequestAccepted {
-            client_address: self.addr,
-            system_index: 0,
-            request_timestamp: connection_request.time,
-            accepted_timestamp: get_time(),
-        };
-        println!("Connected!");
+    fn handle_incoming_packet(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
+        let mut reader = Cursor::new(&bytes[..]);
+        match u8::decode(&mut reader)? {
+            ConnectedPing::ID => {}
+            ConnectedPong::ID => {}
+            _ => self.unhandled.push_back(bytes),
+        }
         Ok(())
     }
 
@@ -140,6 +134,14 @@ impl Conn {
         let mut bytes = vec![];
         encode_syspacket(nack, &mut bytes)?;
         self.send_bytes(&bytes[..]).await
+    }
+
+    pub fn send(&mut self, bytes: Vec<u8>, reliability: Reliability) -> std::io::Result<()> {
+        self.send.send(bytes, reliability)
+    }
+
+    pub fn receive(&mut self) -> Option<Vec<u8>> {
+        self.unhandled.pop_front()
     }
 
     pub async fn update(&mut self) -> std::io::Result<()> {

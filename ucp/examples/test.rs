@@ -22,5 +22,6 @@ async fn main() {
 async fn handle(session: UcpSession) {
     loop {
         let a = session.recv().await.unwrap();
+        dbg!(a[0]);
     }
 }

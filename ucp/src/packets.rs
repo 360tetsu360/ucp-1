@@ -109,7 +109,7 @@ impl Frame {
         Ok(())
     }
     pub fn size(&self) -> usize {
-        let mut ret = 1 + 2;// reliability flag + length(octet)
+        let mut ret = 1 + 2; // reliability flag + length(octet)
         if self.reliability.reliable() {
             ret += 3;
         }
