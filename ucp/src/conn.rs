@@ -13,7 +13,7 @@ const DATAGRAM_FLAG: u8 = 0x80;
 const ACK_FLAG: u8 = 0x40;
 const NACK_FLAG: u8 = 0x20;
 
-pub struct Conn {
+pub(crate) struct Conn {
     addr: SocketAddr,
     socket: Udp,
     receive: ReceiveQueue,
@@ -22,12 +22,12 @@ pub struct Conn {
 }
 
 impl Conn {
-    pub fn new(addr: SocketAddr, socket: Udp) -> Self {
+    pub fn new(addr: SocketAddr, mtu : usize, socket: Udp) -> Self {
         Self {
-            addr,
-            socket,
+            addr: addr.clone(),
+            socket: socket.clone(),
             receive: ReceiveQueue::new(),
-            send: SendQueue::new(),
+            send: SendQueue::new(socket,addr,mtu),
             unhandled: VecDeque::new(),
         }
     }
@@ -99,15 +99,15 @@ impl Conn {
         Ok(())
     }
 
-    async fn send_syspacket<T: SystemPacket>(
-        &self,
+    pub async fn send_syspacket<T: SystemPacket>(
+        &mut self,
         packet: T,
         reliability: Reliability,
     ) -> std::io::Result<()> {
-        todo!();
         let mut bytes = vec![];
         encode_syspacket(packet, &mut bytes)?;
-        self.send_bytes(&bytes[..]).await
+        self.send.send(bytes, reliability);
+        Ok(())
     }
 
     async fn send_ack(&self, seqs: (u32, u32)) -> std::io::Result<()> {
@@ -136,8 +136,8 @@ impl Conn {
         self.send_bytes(&bytes[..]).await
     }
 
-    pub fn send(&mut self, bytes: Vec<u8>, reliability: Reliability) -> std::io::Result<()> {
-        self.send.send(bytes, reliability)
+    pub fn send(&mut self, bytes: &[u8], reliability: Reliability) {
+        self.send.send_ref(bytes, reliability)
     }
 
     pub fn receive(&mut self) -> Option<Vec<u8>> {
@@ -146,7 +146,9 @@ impl Conn {
 
     pub async fn update(&mut self) -> std::io::Result<()> {
         self.flush_ack().await?;
-        self.flush_nack().await
+        self.flush_nack().await?;
+        self.send.tick().await?;
+        Ok(())
     }
 
     async fn flush_ack(&mut self) -> std::io::Result<()> {

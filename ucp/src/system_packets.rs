@@ -2,7 +2,7 @@ use std::{io::Write, net::SocketAddr};
 
 use packet_derive::*;
 
-const UDP_HEADER_LEN: u16 = 32;
+pub const UDP_HEADER_LEN: u16 = 32;
 
 pub(crate) trait SystemPacket: Den {
     const ID: u8;

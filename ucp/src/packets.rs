@@ -36,7 +36,7 @@ impl Reliability {
         matches!(self, Self::UnreliableSequenced | Self::ReliableSequenced)
     }
     pub fn ordered(&self) -> bool {
-        matches!(self, Self::ReliableOrdered)
+        matches!(self, Self::ReliableOrdered) | self.sequenced()
     }
 }
 
@@ -69,7 +69,7 @@ impl Frame {
         if reliability.sequenced() {
             ret.sindex = U24::decode(reader)?;
         }
-        if let Reliability::ReliableOrdered = reliability {
+        if reliability.ordered() {
             ret.oindex = U24::decode(reader)?;
             reader.set_position(reader.position() + 1);
         }
@@ -108,18 +108,18 @@ impl Frame {
         }
         Ok(())
     }
-    pub fn size(&self) -> usize {
+    pub fn size(reliability : Reliability,fragment : bool) -> usize {
         let mut ret = 1 + 2; // reliability flag + length(octet)
-        if self.reliability.reliable() {
+        if reliability.reliable() {
             ret += 3;
         }
-        if self.reliability.sequenced() {
+        if reliability.sequenced() {
             ret += 3;
         }
-        if self.reliability.ordered() {
+        if reliability.ordered() {
             ret += 4;
         }
-        if self.fragment.is_some() {
+        if fragment {
             ret += 4;
             ret += 2;
             ret += 4;

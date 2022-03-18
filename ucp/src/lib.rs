@@ -36,7 +36,7 @@ impl UcpSession {
             self.conn.lock().await.update().await?
         }
     }
-    pub async fn send(&self, bytes: Vec<u8>, reliability: Reliability) -> std::io::Result<()> {
+    pub async fn send(&self, bytes: &[u8], reliability: Reliability) {
         self.conn.lock().await.send(bytes, reliability)
     }
 }
@@ -141,7 +141,7 @@ impl UcpListener {
         let mut bytes = vec![];
         encode_syspacket(reply, &mut bytes)?;
         self.socket.send_to(&bytes[..], src).await?;
-        let session = Arc::new(Mutex::new(Conn::new(src, self.socket.clone())));
+        let session = Arc::new(Mutex::new(Conn::new(src,packet.mtu as usize, self.socket.clone())));
         self.conns.insert(src, session.clone());
         Ok(session)
     }
