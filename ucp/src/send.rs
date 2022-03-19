@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use packet_derive::{DenWith, U24};
+use packet_derive::{Den, DenWith, U24};
 
 use crate::fragment::FragmentHeader;
 use crate::system_packets::UDP_HEADER_LEN;
@@ -12,6 +12,9 @@ use crate::{
     system_packets::{Ack, Nack},
 };
 
+const DATAGRAM_FLAG: u8 = 0x80;
+const NEEDS_B_AND_AS_FLAG: u8 = 0x4;
+const CONTINUOUS_SEND_FLAG: u8 = 0x8;
 const MAX_RTO: Duration = Duration::from_secs(60);
 const MIN_RTO: Duration = Duration::from_secs(1);
 
@@ -165,7 +168,7 @@ impl SendQueue {
                 _ => {}
             }
             let header_size = Frame::size(reliability, true);
-            let payload_size = self.mtu - UDP_HEADER_LEN as usize - 1 - header_size;
+            let payload_size = self.mtu - UDP_HEADER_LEN as usize - 1 - 3 - header_size;
             let m = bytes.len() % payload_size;
             let mut count = (bytes.len() - m) / payload_size;
             if m != 0 {
@@ -206,21 +209,28 @@ impl SendQueue {
             if reliability.sequenced() {
                 self.sindex += 1;
             }
+            return;
         }
         self.send(bytes.to_vec(), reliability);
     }
 
     pub async fn tick(&mut self) -> std::io::Result<()> {
         self.check_timout();
-        let max_payload_len = self.mtu - UDP_HEADER_LEN as usize;
+        let max_payload_len = self.mtu - UDP_HEADER_LEN as usize - 4;
         let mut break_flag = false;
         for _ in 0..self.window_size {
             let mut packets = vec![];
             let mut length = 0;
+            let mut is_fragment = false;
             loop {
                 //////////////////////////////////////////////////////////////////////////////////////
                 if self.resend.front().is_some() {
                     let packet = self.resend.front().unwrap();
+                    if packet.frame.fragment.is_some() {
+                        is_fragment = true;
+                        packets.push(self.resend.pop_front().unwrap());
+                        break;
+                    }
                     let packet_len = packet.length();
                     if packet_len + length < max_payload_len {
                         packets.push(self.resend.pop_front().unwrap());
@@ -233,6 +243,11 @@ impl SendQueue {
                 if self.buffer.front().is_some() {
                     let packet = self.buffer.front().unwrap();
                     let packet_len = packet.length();
+                    if packet.frame.fragment.is_some() {
+                        is_fragment = true;
+                        packets.push(self.resend.pop_front().unwrap());
+                        break;
+                    }
                     if packet_len + length < max_payload_len {
                         packets.push(self.buffer.pop_front().unwrap());
                         length += packet_len;
@@ -247,6 +262,12 @@ impl SendQueue {
 
             let mut buff = vec![];
             let mut writer = std::io::Cursor::new(&mut buff);
+            let id = if is_fragment {
+                DATAGRAM_FLAG | NEEDS_B_AND_AS_FLAG | CONTINUOUS_SEND_FLAG
+            } else {
+                DATAGRAM_FLAG | NEEDS_B_AND_AS_FLAG
+            };
+            u8::encode(&id, &mut writer)?;
             U24::encode(&self.sequence, &mut writer)?;
             for packet in packets.iter() {
                 buff.append(&mut packet.encode()?);
