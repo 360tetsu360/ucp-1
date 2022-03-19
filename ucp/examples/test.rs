@@ -19,9 +19,7 @@ async fn main() {
     }
 }
 
-async fn handle(session: UcpSession) {
-    loop {
-        let a = session.recv().await.unwrap();
-        dbg!(a[0]);
-    }
+async fn handle(mut session: UcpSession) {
+    let a = session.recv().await.unwrap();
+    dbg!(a[0]);
 }

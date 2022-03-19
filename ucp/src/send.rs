@@ -217,7 +217,7 @@ impl SendQueue {
         for _ in 0..self.window_size {
             let mut packets = vec![];
             let mut length = 0;
-            loop { 
+            loop {
                 //////////////////////////////////////////////////////////////////////////////////////
                 if self.resend.front().is_some() {
                     let packet = self.resend.front().unwrap();
@@ -274,10 +274,6 @@ impl SendQueue {
         for seq in resends {
             self.resend(seq);
         }
-    }
-
-    pub fn get(&mut self) -> Option<Vec<u8>> {
-        todo!()
     }
 }
 

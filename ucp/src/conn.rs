@@ -1,7 +1,7 @@
 use packet_derive::*;
-use std::collections::VecDeque;
 use std::io::Cursor;
 use std::net::SocketAddr;
+use tokio::sync::mpsc;
 
 use crate::packets::*;
 use crate::receive::ReceiveQueue;
@@ -18,21 +18,21 @@ pub(crate) struct Conn {
     socket: Udp,
     receive: ReceiveQueue,
     send: SendQueue,
-    unhandled: VecDeque<Vec<u8>>,
+    received_sender: tokio::sync::mpsc::Sender<Vec<u8>>,
 }
 
 impl Conn {
-    pub fn new(addr: SocketAddr, mtu: usize, socket: Udp) -> Self {
+    pub fn new(addr: SocketAddr, mtu: usize, socket: Udp, sender: mpsc::Sender<Vec<u8>>) -> Self {
         Self {
             addr,
             socket: socket.clone(),
             receive: ReceiveQueue::new(),
             send: SendQueue::new(socket, addr, mtu),
-            unhandled: VecDeque::new(),
+            received_sender: sender,
         }
     }
 
-    pub fn handle(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    pub async fn handle(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let mut reader = Cursor::new(bytes);
         let id = u8::decode(&mut reader)?;
 
@@ -41,11 +41,11 @@ impl Conn {
         } else if id & NACK_FLAG != 0 {
             self.handle_nack(bytes)?;
         } else if id & DATAGRAM_FLAG != 0 {
-            self.handle_datagram(&bytes[1..])?;
+            self.handle_datagram(&bytes[1..]).await?;
         }
         Ok(())
     }
-    fn handle_datagram(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    async fn handle_datagram(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let mut reader = Cursor::new(bytes);
         let sequence = U24::decode(&mut reader)?;
         self.receive.received(sequence);
@@ -54,7 +54,7 @@ impl Conn {
             let data = &reader.get_ref()
                 [reader.position() as usize..reader.position() as usize + frame.length as usize];
             reader.set_position(reader.position() + frame.length as usize as u64);
-            self.handle_packet(frame, data)?;
+            self.handle_packet(frame, data).await?;
         }
         Ok(())
     }
@@ -68,28 +68,31 @@ impl Conn {
         self.send.nack(nack);
         Ok(())
     }
-    fn handle_packet(&mut self, frame: Frame, bytes: &[u8]) -> std::io::Result<()> {
+    async fn handle_packet(&mut self, frame: Frame, bytes: &[u8]) -> std::io::Result<()> {
         if frame.fragment.is_some() {
             if let Some(data) = self.receive.fragmented(frame, bytes) {
-                self.handle_incoming_packet(data)?;
+                self.handle_incoming_packet(data).await?;
             }
         } else if !frame.reliability.sequenced() && !frame.reliability.ordered() {
-            self.handle_incoming_packet(bytes.to_vec())?;
+            self.handle_incoming_packet(bytes.to_vec()).await?;
         } else {
             self.receive.ordered(frame, bytes);
             while let Some(data) = self.receive.next_ordered() {
-                self.handle_incoming_packet(data)?;
+                self.handle_incoming_packet(data).await?;
             }
         }
         Ok(())
     }
 
-    fn handle_incoming_packet(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
+    async fn handle_incoming_packet(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
         let mut reader = Cursor::new(&bytes[..]);
         match u8::decode(&mut reader)? {
             ConnectedPing::ID => {}
             ConnectedPong::ID => {}
-            _ => self.unhandled.push_back(bytes),
+            _ => match self.received_sender.send(bytes).await {
+                Ok(_) => {}
+                Err(_) => todo!(),
+            },
         }
         Ok(())
     }
@@ -138,10 +141,6 @@ impl Conn {
 
     pub fn send(&mut self, bytes: &[u8], reliability: Reliability) {
         self.send.send_ref(bytes, reliability)
-    }
-
-    pub fn receive(&mut self) -> Option<Vec<u8>> {
-        self.unhandled.pop_front()
     }
 
     pub async fn update(&mut self) -> std::io::Result<()> {
