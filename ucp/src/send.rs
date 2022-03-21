@@ -15,7 +15,7 @@ use crate::{
 const DATAGRAM_FLAG: u8 = 0x80;
 const NEEDS_B_AND_AS_FLAG: u8 = 0x4;
 const CONTINUOUS_SEND_FLAG: u8 = 0x8;
-const MAX_RTO: Duration = Duration::from_secs(60);
+const MAX_RTO: Duration = Duration::from_secs(10);
 const MIN_RTO: Duration = Duration::from_secs(1);
 
 type Rtts = (Duration, Duration); // srtt,rttvar
@@ -51,12 +51,13 @@ pub(crate) struct SendQueue {
 
     mtu: usize,
 
-    window_size: usize,
+    cwnd: usize,
 
     rto: Duration,
     rtts: Option<Rtts>,
 
     sent: HashMap<u32, (Vec<OutPacket>, Instant)>,
+    resent : HashMap<u32,(Vec<OutPacket>,Instant)>
 }
 
 impl SendQueue {
@@ -72,10 +73,11 @@ impl SendQueue {
             sindex: 0,
             fragment_id: 0,
             mtu,
-            window_size: 1,
+            cwnd: 1,
             rto: Duration::from_secs(1),
             rtts: None,
             sent: HashMap::new(),
+            resent : HashMap::new(),
         }
     }
 
@@ -218,13 +220,15 @@ impl SendQueue {
         self.check_timout();
         let max_payload_len = self.mtu - UDP_HEADER_LEN as usize - 4;
         let mut break_flag = false;
-        for _ in 0..self.window_size {
+        for _ in 0..self.cwnd {
             let mut packets = vec![];
             let mut length = 0;
             let mut is_fragment = false;
+            let mut resend = false;
             loop {
                 //////////////////////////////////////////////////////////////////////////////////////
                 if self.resend.front().is_some() {
+                    resend  = true;
                     let packet = self.resend.front().unwrap();
                     if packet.frame.fragment.is_some() {
                         is_fragment = true;
@@ -274,7 +278,11 @@ impl SendQueue {
             }
             self.udp.send_to(&buff, self.addr).await?;
 
-            self.sent.insert(self.sequence, (packets, Instant::now()));
+            if resend {
+                self.resent.insert(self.sequence, (packets, Instant::now()));
+            }else {
+                self.sent.insert(self.sequence, (packets, Instant::now()));
+            }
             self.sequence += 1;
 
             if break_flag {
