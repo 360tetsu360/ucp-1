@@ -37,9 +37,9 @@ impl Conn {
         let id = u8::decode(&mut reader)?;
 
         if id & ACK_FLAG != 0 {
-            self.handle_ack(bytes)?;
+            self.handle_ack(bytes).await?;
         } else if id & NACK_FLAG != 0 {
-            self.handle_nack(bytes)?;
+            self.handle_nack(bytes).await?;
         } else if id & DATAGRAM_FLAG != 0 {
             self.handle_datagram(&bytes[1..]).await?;
         }
@@ -58,14 +58,14 @@ impl Conn {
         }
         Ok(())
     }
-    fn handle_ack(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    async fn handle_ack(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let ack: Ack = decode_syspacket(bytes)?;
-        self.send.ack(ack);
+        self.send.ack(ack).await?;
         Ok(())
     }
-    fn handle_nack(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    async fn handle_nack(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let nack: Nack = decode_syspacket(bytes)?;
-        self.send.nack(nack);
+        self.send.nack(nack).await?;
         Ok(())
     }
     async fn handle_packet(&mut self, frame: Frame, bytes: &[u8]) -> std::io::Result<()> {

@@ -40,67 +40,71 @@ impl OutPacket {
 pub(crate) struct SendQueue {
     udp: Udp,
     addr: SocketAddr,
+    mtu : usize,
 
-    buffer: VecDeque<OutPacket>,
-    resend: VecDeque<OutPacket>,
+    //The frames to be sent are stacked here.
+    buffer : VecDeque<OutPacket>,
+    //Framesets waiting to be acked are stacked here.
+    sent : HashMap<u32,(Instant,Vec<OutPacket>)>,
+
+    //Recovery time objective. If the Ack is not received after this time, it is assumed that the packet was discarded.
+    //
+    rto : Duration,
+    rtts: Option<Rtts>,
+    //Number of Framesets that can be sent at one time
+    cwnd : usize,
+
     sequence: u32,
     mindex: u32,
     oindex: u32,
     sindex: u32,
     fragment_id: u16,
-
-    mtu: usize,
-
-    cwnd: usize,
-
-    rto: Duration,
-    rtts: Option<Rtts>,
-
-    sent: HashMap<u32, (Vec<OutPacket>, Instant)>,
-    resent : HashMap<u32,(Vec<OutPacket>,Instant)>
 }
 
 impl SendQueue {
-    pub fn new(udp: Udp, addr: SocketAddr, mtu: usize) -> Self {
+    pub fn new(udp : Udp,addr : SocketAddr,mtu : usize) -> Self {
         Self {
+            mtu,
             udp,
             addr,
-            buffer: VecDeque::new(),
-            resend: VecDeque::new(),
-            sequence: 0,
-            mindex: 0,
-            oindex: 0,
-            sindex: 0,
-            fragment_id: 0,
-            mtu,
-            cwnd: 1,
-            rto: Duration::from_secs(1),
-            rtts: None,
-            sent: HashMap::new(),
-            resent : HashMap::new(),
+            buffer : VecDeque::new(),
+            sent : HashMap::new(),
+            rto : Duration::from_secs(1),
+            rtts : None,
+            cwnd : todo!(),
+            sequence : 0,
+            mindex : 0,
+            oindex : 0,
+            sindex : 0,
+            fragment_id : 0,
+
         }
     }
 
-    pub fn ack(&mut self, ack: Ack) {
-        let now = Instant::now();
-
-        for i in ack.ack.sequences.0..ack.ack.sequences.1 + 1 {
-            if self.sent.contains_key(&i) {
-                if i == ack.ack.sequences.1 {
-                    let sent_time = self.sent.remove(&i).unwrap().1;
-                    let rtt = now.duration_since(sent_time);
+    pub async fn ack(&mut self, ack: Ack) -> std::io::Result<()> {
+        if ack.ack.sequences.0 < ack.ack.sequences.1+1 {
+            for seq in ack.ack.sequences.0..ack.ack.sequences.1 + 1 {
+                if seq == ack.ack.sequences.1 && self.sent.contains_key(&seq) {
+                    let now = Instant::now();
+                    let rtt = self.sent.get(&seq).unwrap().0.duration_since(now);
                     self.compute_rto(rtt);
-                } else {
-                    self.sent.remove(&i);
+                }
+                self.sent.remove(&seq);
+                if self.sent.is_empty() {
+                    self.send_frameset().await?;
                 }
             }
         }
+        Ok(())
     }
 
-    pub fn nack(&mut self, nack: Nack) {
-        for i in nack.nack.sequences.0..nack.nack.sequences.1 + 1 {
-            self.resend(i);
+    pub async fn nack(&mut self, nack: Nack) -> std::io::Result<()> {
+        if nack.nack.sequences.0 < nack.nack.sequences.1 + 1 {
+            for seq in nack.nack.sequences.0..nack.nack.sequences.1+1 {
+                self.resend(seq).await?;
+            }
         }
+        Ok(())
     }
 
     fn compute_rto(&mut self, rtt: Duration) {
@@ -124,14 +128,70 @@ impl SendQueue {
         }
     }
 
-    fn resend(&mut self, seq: u32) {
-        if let Some((set, _)) = self.sent.remove(&seq) {
-            for packet in set {
-                if packet.frame.reliability.reliable() {
-                    self.resend.push_back(packet);
+    async fn resend(&mut self, seq : u32) -> std::io::Result<()> {
+        if let Some((_,sent)) = self.sent.remove(&seq) {
+            let mut resends = vec![];
+            for out in sent {
+                if out.frame.reliability.reliable() {
+                    resends.push(out);
                 }
             }
+            todo!();
         }
+        Ok(())
+    }
+
+    async fn send_frameset(&mut self) -> std::io::Result<()> {
+        let max_payload_len = self.mtu - UDP_HEADER_LEN as usize - 4;
+        let mut break_flag = false;
+        let now = Instant::now();
+        for _ in 0..self.cwnd {
+            let mut packets = vec![];
+            let mut length = 0;
+            let mut is_fragment = false;
+            loop {
+                if self.buffer.front().is_some() {
+                    let packet = self.buffer.front().unwrap();
+                    let packet_len = packet.length();
+                    if packet.frame.fragment.is_some() {
+                        is_fragment = true;
+                        packets.push(self.buffer.pop_front().unwrap());
+                        break;
+                    }
+                    if packet_len + length < max_payload_len {
+                        packets.push(self.buffer.pop_front().unwrap());
+                        length += packet_len;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break_flag = true;
+                    break;
+                }
+            }
+
+            let mut buff = vec![];
+            let mut writer = std::io::Cursor::new(&mut buff);
+            let id = if is_fragment {
+                DATAGRAM_FLAG | NEEDS_B_AND_AS_FLAG | CONTINUOUS_SEND_FLAG
+            } else {
+                DATAGRAM_FLAG | NEEDS_B_AND_AS_FLAG
+            };
+            u8::encode(&id, &mut writer)?;
+            U24::encode(&self.sequence, &mut writer)?;
+            for packet in packets.iter() {
+                buff.append(&mut packet.encode()?);
+            }
+            self.udp.send_to(&buff, self.addr).await?;
+
+            self.sent.insert(self.sequence, (now,packets));
+            self.sequence += 1;
+
+            if break_flag {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn send_out_packet(&mut self, packet: OutPacket) {
@@ -163,7 +223,7 @@ impl SendQueue {
     }
 
     pub fn send_ref(&mut self, bytes: &[u8], mut reliability: Reliability) {
-        if bytes.len() > self.mtu - UDP_HEADER_LEN as usize - 1 - Frame::size(reliability, false) {
+        if bytes.len() > self.mtu - UDP_HEADER_LEN as usize - 4 - Frame::size(reliability, false) {
             match reliability {
                 Reliability::Unreliable => reliability = Reliability::Reliable,
                 Reliability::UnreliableSequenced => reliability = Reliability::ReliableSequenced,
@@ -217,92 +277,29 @@ impl SendQueue {
     }
 
     pub async fn tick(&mut self) -> std::io::Result<()> {
-        self.check_timout();
-        let max_payload_len = self.mtu - UDP_HEADER_LEN as usize - 4;
-        let mut break_flag = false;
-        for _ in 0..self.cwnd {
-            let mut packets = vec![];
-            let mut length = 0;
-            let mut is_fragment = false;
-            let mut resend = false;
-            loop {
-                //////////////////////////////////////////////////////////////////////////////////////
-                if self.resend.front().is_some() {
-                    resend  = true;
-                    let packet = self.resend.front().unwrap();
-                    if packet.frame.fragment.is_some() {
-                        is_fragment = true;
-                        packets.push(self.resend.pop_front().unwrap());
-                        break;
-                    }
-                    let packet_len = packet.length();
-                    if packet_len + length < max_payload_len {
-                        packets.push(self.resend.pop_front().unwrap());
-                        length += packet_len;
-                    } else {
-                        break;
-                    }
-                }
-                //////////////////////////////////////////////////////////////////////////////////////
-                if self.buffer.front().is_some() {
-                    let packet = self.buffer.front().unwrap();
-                    let packet_len = packet.length();
-                    if packet.frame.fragment.is_some() {
-                        is_fragment = true;
-                        packets.push(self.resend.pop_front().unwrap());
-                        break;
-                    }
-                    if packet_len + length < max_payload_len {
-                        packets.push(self.buffer.pop_front().unwrap());
-                        length += packet_len;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break_flag = true;
-                    break;
-                }
-            }
-
-            let mut buff = vec![];
-            let mut writer = std::io::Cursor::new(&mut buff);
-            let id = if is_fragment {
-                DATAGRAM_FLAG | NEEDS_B_AND_AS_FLAG | CONTINUOUS_SEND_FLAG
-            } else {
-                DATAGRAM_FLAG | NEEDS_B_AND_AS_FLAG
-            };
-            u8::encode(&id, &mut writer)?;
-            U24::encode(&self.sequence, &mut writer)?;
-            for packet in packets.iter() {
-                buff.append(&mut packet.encode()?);
-            }
-            self.udp.send_to(&buff, self.addr).await?;
-
-            if resend {
-                self.resent.insert(self.sequence, (packets, Instant::now()));
-            }else {
-                self.sent.insert(self.sequence, (packets, Instant::now()));
-            }
-            self.sequence += 1;
-
-            if break_flag {
-                break;
-            }
-        }
-        Ok(())
+        self.check_timout().await
     }
 
-    fn check_timout(&mut self) {
+    async fn check_timout(&mut self) -> std::io::Result<()> {
         let now = Instant::now();
         let resends: Vec<u32> = self
             .sent
             .iter()
-            .filter(|x| now.duration_since(x.1 .1) > self.rto)
+            .filter(|x| now.duration_since(x.1 .0) > self.rto)
             .map(|x| *x.0)
             .collect();
-        for seq in resends {
-            self.resend(seq);
+        
+        if !resends.is_empty() {
+            self.rto *= 2;
+            if self.rto > MAX_RTO {
+                self.rto = MAX_RTO;
+            }
         }
+        for seq in resends {
+            self.resend(seq).await?;
+            //
+        }
+        Ok(())
     }
 }
 
