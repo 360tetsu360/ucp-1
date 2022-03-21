@@ -129,7 +129,7 @@ impl SendQueue {
     }
 
     async fn resend(&mut self, seq : u32) -> std::io::Result<()> {
-        if let Some((_,sent)) = self.sent.remove(&seq) {
+        if let Some((_,sent)) = self.sent.remove(&seq) { //dont remove
             let mut resends = vec![];
             for out in sent {
                 if out.frame.reliability.reliable() {
