@@ -48,7 +48,6 @@ impl Conn {
     async fn handle_datagram(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         let mut reader = Cursor::new(bytes);
         let sequence = U24::decode(&mut reader)?;
-        self.receive.received(sequence);
         while reader.position() < bytes.len() as u64 {
             let frame = Frame::decode(&mut reader)?;
             let data = &reader.get_ref()
@@ -56,6 +55,7 @@ impl Conn {
             reader.set_position(reader.position() + frame.length as usize as u64);
             self.handle_packet(frame, data).await?;
         }
+        self.receive.received(sequence);
         Ok(())
     }
     async fn handle_ack(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -162,5 +162,13 @@ impl Conn {
             self.send_nack(nacks).await?
         }
         Ok(())
+    }
+
+    pub fn set_nodelay(&mut self,nodelay : bool) {
+        self.send.set_nodelay(nodelay);
+    }
+
+    pub fn nodelay(&self) -> bool {
+        self.send.nodelay()
     }
 }

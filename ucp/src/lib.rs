@@ -6,7 +6,7 @@ use packets::Reliability;
 use system_packets::*;
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
-    sync::{mpsc, Mutex},
+    sync::{mpsc,Mutex,Notify}
 };
 
 pub(crate) mod conn;
@@ -27,8 +27,8 @@ pub struct UcpSession {
     addr: SocketAddr,
     conn: Session,
 
-    drop_sender: mpsc::Sender<()>,
-    drop_notifyor: mpsc::Sender<SocketAddr>,
+    drop_notifyor: Arc<Notify>,
+    drop_sender: mpsc::Sender<SocketAddr>,
 }
 
 impl UcpSession {
@@ -36,10 +36,11 @@ impl UcpSession {
         conn: Session,
         receiver: mpsc::Receiver<Vec<u8>>,
         addr: SocketAddr,
-        notifyor: mpsc::Sender<SocketAddr>,
+        sender: mpsc::Sender<SocketAddr>,
     ) -> Self {
         let ticker = conn.clone();
-        let (s, mut r) = mpsc::channel(1);
+        let n1 = Arc::new(Notify::new());
+        let n2 = n1.clone();
         tokio::spawn(async move {
             loop {
                 let tick = async {
@@ -48,7 +49,7 @@ impl UcpSession {
                 };
                 tokio::select! {
                     _ = tick => {},
-                    _ = r.recv() => {
+                    _ = n1.notified() => {
                         break;
                     }
                 }
@@ -58,10 +59,11 @@ impl UcpSession {
             receiver,
             addr,
             conn,
-            drop_sender: s,
-            drop_notifyor: notifyor,
+            drop_notifyor: n2,
+            drop_sender: sender,
         }
     }
+
     pub async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
         loop {
             if let Some(packet) = self.receiver.recv().await {
@@ -70,19 +72,28 @@ impl UcpSession {
             }
         }
     }
+
     pub async fn send(&self, bytes: &[u8], reliability: Reliability) {
         self.conn.lock().await.send(bytes, reliability)
+    }
+
+    pub async fn set_nodelay(&self,nodelay : bool) {
+        self.conn.lock().await.set_nodelay(nodelay);
+    }
+
+    pub async fn nodelay(&self) -> bool {
+        self.conn.lock().await.nodelay()
     }
 }
 
 impl Drop for UcpSession {
     fn drop(&mut self) {
-        let s1 = self.drop_sender.clone();
-        let s2 = self.drop_notifyor.clone();
+        let s = self.drop_sender.clone();
+        let n = self.drop_notifyor.clone();
         let addr = self.addr;
         tokio::spawn(async move {
-            s1.send(()).await.unwrap();
-            s2.send(addr).await.unwrap();
+            n.notify_one();
+            s.send(addr).await.unwrap();
         });
     }
 }

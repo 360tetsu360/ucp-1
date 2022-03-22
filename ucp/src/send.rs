@@ -54,6 +54,10 @@ pub(crate) struct SendQueue {
     //Number of Framesets that can be sent at one time
     cwnd : usize,
 
+    nodelay : bool,
+
+    pub timeout : bool,
+
     sequence: u32,
     mindex: u32,
     oindex: u32,
@@ -72,6 +76,8 @@ impl SendQueue {
             rto : Duration::from_secs(1),
             rtts : None,
             cwnd : todo!(),
+            nodelay : true,
+            timeout : false,
             sequence : 0,
             mindex : 0,
             oindex : 0,
@@ -79,6 +85,14 @@ impl SendQueue {
             fragment_id : 0,
 
         }
+    }
+
+    pub fn set_nodelay(&mut self,nodelay : bool) {
+        self.nodelay = nodelay;
+    }
+
+    pub fn nodelay(&self) -> bool {
+        self.nodelay
     }
 
     pub async fn ack(&mut self, ack: Ack) -> std::io::Result<()> {
@@ -130,10 +144,9 @@ impl SendQueue {
 
     async fn resend(&mut self, seq : u32) -> std::io::Result<()> {
         if let Some((_,sent)) = self.sent.remove(&seq) { //dont remove
-            let mut resends = vec![];
             for out in sent {
                 if out.frame.reliability.reliable() {
-                    resends.push(out);
+                    self.buffer.push_front(out);
                 }
             }
             todo!();
@@ -277,6 +290,9 @@ impl SendQueue {
     }
 
     pub async fn tick(&mut self) -> std::io::Result<()> {
+        if !self.buffer.is_empty() && self.sent.is_empty() {
+            self.send_frameset().await?;
+        }
         self.check_timout().await
     }
 
@@ -296,7 +312,7 @@ impl SendQueue {
             }
         }
         for seq in resends {
-            self.resend(seq).await?;
+            //self.resend(seq).await?;
             //
         }
         Ok(())
