@@ -6,7 +6,7 @@ use packets::Reliability;
 use system_packets::*;
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
-    sync::{mpsc,Mutex,Notify}
+    sync::{mpsc, Mutex, Notify},
 };
 
 pub(crate) mod conn;
@@ -73,11 +73,11 @@ impl UcpSession {
         }
     }
 
-    pub async fn send(&self, bytes: &[u8], reliability: Reliability) {
-        self.conn.lock().await.send(bytes, reliability)
+    pub async fn send(&self, bytes: &[u8], reliability: Reliability) -> std::io::Result<()> {
+        self.conn.lock().await.send(bytes, reliability).await
     }
 
-    pub async fn set_nodelay(&self,nodelay : bool) {
+    pub async fn set_nodelay(&self, nodelay: bool) {
         self.conn.lock().await.set_nodelay(nodelay);
     }
 

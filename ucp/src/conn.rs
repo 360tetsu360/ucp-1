@@ -109,7 +109,7 @@ impl Conn {
     ) -> std::io::Result<()> {
         let mut bytes = vec![];
         encode_syspacket(packet, &mut bytes)?;
-        self.send.send(bytes, reliability);
+        self.send.send(bytes, reliability).await?;
         Ok(())
     }
 
@@ -139,8 +139,8 @@ impl Conn {
         self.send_bytes(&bytes[..]).await
     }
 
-    pub fn send(&mut self, bytes: &[u8], reliability: Reliability) {
-        self.send.send_ref(bytes, reliability)
+    pub async fn send(&mut self, bytes: &[u8], reliability: Reliability) -> std::io::Result<()> {
+        self.send.send_ref(bytes, reliability).await
     }
 
     pub async fn update(&mut self) -> std::io::Result<()> {
@@ -164,7 +164,7 @@ impl Conn {
         Ok(())
     }
 
-    pub fn set_nodelay(&mut self,nodelay : bool) {
+    pub fn set_nodelay(&mut self, nodelay: bool) {
         self.send.set_nodelay(nodelay);
     }
 
