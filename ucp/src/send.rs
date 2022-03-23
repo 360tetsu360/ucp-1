@@ -50,7 +50,7 @@ pub(crate) struct SendQueue {
     //Framesets waiting to be acked are stacked here.
     sent: HashMap<u32, (Instant, Vec<OutPacket>)>,
 
-    timeouted : VecDeque<OutPacket>,
+    timeouted: VecDeque<OutPacket>,
 
     //Recovery time objective. If the Ack is not received after this time, it is assumed that the packet was discarded.
     //
@@ -79,7 +79,7 @@ impl SendQueue {
             addr,
             buffer: VecDeque::new(),
             sent: HashMap::new(),
-            timeouted : VecDeque::new(),
+            timeouted: VecDeque::new(),
             rto: Duration::from_secs(1),
             rtts: None,
             cubic: Cubic::new(),
@@ -347,7 +347,7 @@ impl SendQueue {
 
     async fn check_timout(&mut self) -> std::io::Result<()> {
         let now = Instant::now();
-        let resends : Vec<u32> = self
+        let resends: Vec<u32> = self
             .sent
             .iter()
             .filter(|x| now.duration_since(x.1 .0) > self.rto)
@@ -360,7 +360,7 @@ impl SendQueue {
         Ok(())
     }
 
-    async fn timeouted(&mut self,seq : u32) -> std::io::Result<()> {
+    async fn timeouted(&mut self, seq: u32) -> std::io::Result<()> {
         if self.timeouted.is_empty() {
             //update cubic
 
@@ -369,7 +369,7 @@ impl SendQueue {
                 self.rto = MAX_RTO;
             }
         }
-        let (_,sent) = self.sent.remove(&seq).unwrap();
+        let (_, sent) = self.sent.remove(&seq).unwrap();
 
         for out in sent {
             if out.frame.reliability.reliable() {
