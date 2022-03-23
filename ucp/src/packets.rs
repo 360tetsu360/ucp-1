@@ -40,6 +40,7 @@ impl Reliability {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Frame {
     pub reliability: Reliability,
     pub length: u16,

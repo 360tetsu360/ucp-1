@@ -21,6 +21,7 @@ const MIN_RTO: Duration = Duration::from_secs(1);
 
 type Rtts = (Duration, Duration); // srtt,rttvar
 
+#[derive(Clone)]
 pub(crate) struct OutPacket {
     pub frame: Frame,
     pub data: Vec<u8>,
@@ -49,6 +50,8 @@ pub(crate) struct SendQueue {
     //Framesets waiting to be acked are stacked here.
     sent: HashMap<u32, (Instant, Vec<OutPacket>)>,
 
+    timeouted : VecDeque<OutPacket>,
+
     //Recovery time objective. If the Ack is not received after this time, it is assumed that the packet was discarded.
     //
     rto: Duration,
@@ -76,6 +79,7 @@ impl SendQueue {
             addr,
             buffer: VecDeque::new(),
             sent: HashMap::new(),
+            timeouted : VecDeque::new(),
             rto: Duration::from_secs(1),
             rtts: None,
             cubic: Cubic::new(),
@@ -158,6 +162,33 @@ impl SendQueue {
         //sendable packets , is fragment
         let mut packets = vec![];
         let mut length = 0;
+
+        if !self.timeouted.is_empty() {
+            /*loop {
+                if self.timeouted.front().is_some() {
+                    let packet = self.timeouted.front().unwrap();
+                    let packet_len = packet.length();
+                    if packet_len + length < self.max_payload_len {
+                        packets.push(self.buffer.front().unwrap().clone());
+                        length += packet_len;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }*/
+            for timeouted in self.timeouted.iter() {
+                let packet_len = timeouted.length();
+                if packet_len + length < self.max_payload_len {
+                    packets.push(timeouted.clone());
+                    length += packet_len;
+                } else {
+                    break;
+                }
+            }
+            return packets;
+        }
 
         loop {
             if self.buffer.front().is_some() {
@@ -316,24 +347,36 @@ impl SendQueue {
 
     async fn check_timout(&mut self) -> std::io::Result<()> {
         let now = Instant::now();
-        let resends: Vec<u32> = self
+        let resends : Vec<u32> = self
             .sent
             .iter()
             .filter(|x| now.duration_since(x.1 .0) > self.rto)
             .map(|x| *x.0)
             .collect();
 
-        if !resends.is_empty() {
+        for seq in resends {
+            self.timeouted(seq).await?;
+        }
+        Ok(())
+    }
+
+    async fn timeouted(&mut self,seq : u32) -> std::io::Result<()> {
+        if self.timeouted.is_empty() {
+            //update cubic
+
             self.rto *= 2;
             if self.rto > MAX_RTO {
                 self.rto = MAX_RTO;
             }
         }
-        for seq in resends {
-            //self.resend(seq).await?;
-            //
+        let (_,sent) = self.sent.remove(&seq).unwrap();
+
+        for out in sent {
+            if out.frame.reliability.reliable() {
+                self.timeouted.push_back(out);
+            }
         }
-        Ok(())
+        self.send_next().await
     }
 }
 
