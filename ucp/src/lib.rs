@@ -16,6 +16,7 @@ pub(crate) mod receive;
 pub(crate) mod send;
 pub(crate) mod system_packets;
 pub(crate) mod time;
+pub(crate) mod cubic;
 
 pub const PROTOCOL_VERSION: u8 = 0xA;
 

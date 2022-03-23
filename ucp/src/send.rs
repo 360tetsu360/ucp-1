@@ -51,7 +51,7 @@ pub(crate) struct SendQueue {
     //
     rto: Duration,
     rtts: Option<Rtts>,
-    //Number of Framesets that can be sent at one time
+    //Window size
     cwnd: usize,
 
     nodelay: bool,
