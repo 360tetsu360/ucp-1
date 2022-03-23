@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use packet_derive::{Den, DenWith, U24};
 
+use crate::cubic::Cubic;
 use crate::fragment::FragmentHeader;
 use crate::system_packets::UDP_HEADER_LEN;
 use crate::Udp;
@@ -41,6 +42,7 @@ pub(crate) struct SendQueue {
     udp: Udp,
     addr: SocketAddr,
     mtu: usize,
+    max_payload_len: usize,
 
     //The frames to be sent are stacked here.
     buffer: VecDeque<OutPacket>,
@@ -52,7 +54,7 @@ pub(crate) struct SendQueue {
     rto: Duration,
     rtts: Option<Rtts>,
     //Window size
-    cwnd: usize,
+    cubic: Cubic,
 
     nodelay: bool,
 
@@ -69,13 +71,14 @@ impl SendQueue {
     pub fn new(udp: Udp, addr: SocketAddr, mtu: usize) -> Self {
         Self {
             mtu,
+            max_payload_len: mtu - UDP_HEADER_LEN as usize - 4, //
             udp,
             addr,
             buffer: VecDeque::new(),
             sent: HashMap::new(),
             rto: Duration::from_secs(1),
             rtts: None,
-            cwnd: todo!(),
+            cubic: Cubic::new(),
             nodelay: true,
             timeout: false,
             sequence: 0,
@@ -141,7 +144,6 @@ impl SendQueue {
 
     async fn resend_nack(&mut self, seq: u32) -> std::io::Result<()> {
         if let Some((_, sent)) = self.sent.remove(&seq) {
-            //dont remove
             for out in sent {
                 if out.frame.reliability.reliable() {
                     self.buffer.push_front(out);
@@ -154,7 +156,6 @@ impl SendQueue {
 
     fn get_next(&mut self) -> Vec<OutPacket> {
         //sendable packets , is fragment
-        let max_payload_len = self.mtu - UDP_HEADER_LEN as usize - 4;
         let mut packets = vec![];
         let mut length = 0;
 
@@ -162,7 +163,7 @@ impl SendQueue {
             if self.buffer.front().is_some() {
                 let packet = self.buffer.front().unwrap();
                 let packet_len = packet.length();
-                if packet_len + length < max_payload_len {
+                if packet_len + length < self.max_payload_len {
                     packets.push(self.buffer.pop_front().unwrap());
                     length += packet_len;
                 } else {
@@ -176,7 +177,7 @@ impl SendQueue {
     }
 
     async fn send_next(&mut self) -> std::io::Result<()> {
-        if self.sent.len() >= self.cwnd {
+        if self.sent.len() >= self.cubic.cwnd {
             return Ok(());
         }
 
@@ -194,7 +195,7 @@ impl SendQueue {
                 return Ok(());
             }
             let size: usize = self.buffer.iter().map(|x| x.length()).sum();
-            if size > self.mtu - UDP_HEADER_LEN as usize - 4 {
+            if size > self.max_payload_len {
                 let sendable = self.get_next();
                 self.send_frameset(sendable).await?;
             }
@@ -254,14 +255,14 @@ impl SendQueue {
         bytes: &[u8],
         mut reliability: Reliability,
     ) -> std::io::Result<()> {
-        if bytes.len() > self.mtu - UDP_HEADER_LEN as usize - 4 - Frame::size(reliability, false) {
+        if bytes.len() > self.max_payload_len - Frame::size(reliability, false) {
             match reliability {
                 Reliability::Unreliable => reliability = Reliability::Reliable,
                 Reliability::UnreliableSequenced => reliability = Reliability::ReliableSequenced,
                 _ => {}
             }
             let header_size = Frame::size(reliability, true);
-            let payload_size = self.mtu - UDP_HEADER_LEN as usize - 1 - 3 - header_size;
+            let payload_size = self.max_payload_len - header_size;
             let m = bytes.len() % payload_size;
             let mut count = (bytes.len() - m) / payload_size;
             if m != 0 {
