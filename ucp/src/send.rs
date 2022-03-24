@@ -72,10 +72,12 @@ impl ResendQueue {
         None
     }
 
-    pub fn timeout(&mut self, id: u32) {
+    pub fn timeout(&mut self, id: u32) -> u32 {
         if let Some((_, count)) = self.resends.get_mut(&id) {
             *count += 1;
+            return *count;
         }
+        0
     }
 
     pub fn ack(&mut self, id: u32) {
@@ -89,7 +91,6 @@ impl ResendQueue {
 
 struct ResendVal {
     pub id: u32,
-    pub count: u32,
 }
 
 pub(crate) struct SendQueue {
@@ -112,8 +113,6 @@ pub(crate) struct SendQueue {
 
     nodelay: bool,
 
-    pub timeout: bool,
-
     sequence: u32,
     mindex: u32,
     oindex: u32,
@@ -135,7 +134,6 @@ impl SendQueue {
             rtts: None,
             cubic: Cubic::new(),
             nodelay: true,
-            timeout: false,
             sequence: 0,
             mindex: 0,
             oindex: 0,
@@ -164,7 +162,9 @@ impl SendQueue {
                         self.timeouted.ack(val.id);
                     }
 
-                    self.send_next().await?;
+                    for _ in self.sent.len()..self.cubic.cwnd {
+                        self.send_next().await?;
+                    }
                 }
             }
         }
@@ -227,13 +227,7 @@ impl SendQueue {
         let mut length = 0;
 
         if let Some(next) = self.timeouted.get() {
-            return (
-                next.1,
-                Some(ResendVal {
-                    id: next.0,
-                    count: next.2,
-                }),
-            );
+            return (next.1, Some(ResendVal { id: next.0 }));
         }
 
         loop {
@@ -428,7 +422,9 @@ impl SendQueue {
                 self.rto = MAX_RTO;
             }
 
-            self.timeouted.timeout(val.id)
+            let count = self.timeouted.timeout(val.id);
+            if count > 8 { //The maximum number of retransmissions is eight.
+            }
         }
 
         for out in sent {

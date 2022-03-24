@@ -16,7 +16,6 @@ pub mod packets;
 pub(crate) mod receive;
 pub(crate) mod send;
 pub(crate) mod system_packets;
-pub(crate) mod time;
 
 pub const PROTOCOL_VERSION: u8 = 0xA;
 
@@ -90,10 +89,9 @@ impl UcpSession {
 impl Drop for UcpSession {
     fn drop(&mut self) {
         let s = self.drop_sender.clone();
-        let n = self.drop_notifyor.clone();
+        self.drop_notifyor.notify_one();
         let addr = self.addr;
         tokio::spawn(async move {
-            n.notify_one();
             s.send(addr).await.unwrap();
         });
     }
