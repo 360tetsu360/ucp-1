@@ -4,11 +4,6 @@ use ucp::{UcpListener, UcpSession};
 
 #[tokio::main]
 async fn main() {
-    let time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    dbg!(time);
     let addr: SocketAddr = "127.0.0.1:19132".parse().unwrap();
     let mut ucp = UcpListener::bind(addr, 0x114514, "MCPE;Dedicated Server;390;1.14.60;0;10;13253860892328930865;Bedrock level;Survival;1;19132;19133;".to_owned())
         .await
@@ -20,6 +15,13 @@ async fn main() {
 }
 
 async fn handle(mut session: UcpSession) {
-    let a = session.recv().await.unwrap();
-    dbg!(a[0]);
+    loop{
+        let packet = session.recv().await.unwrap();
+        match packet[0] {
+            0xfe => {
+                println!("Game packet!");
+            },
+            _ => {}
+        }
+    }
 }
