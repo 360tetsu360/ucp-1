@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,6 @@ use crate::{
 
 const DATAGRAM_FLAG: u8 = 0x80;
 const NEEDS_B_AND_AS_FLAG: u8 = 0x4;
-const CONTINUOUS_SEND_FLAG: u8 = 0x8;
 const MAX_RTO: Duration = Duration::from_secs(10);
 const MIN_RTO: Duration = Duration::from_secs(1);
 
@@ -39,24 +38,76 @@ impl OutPacket {
     }
 }
 
+struct ResendQueue {
+    max: u32,
+    resends: BTreeMap<u32, (Vec<OutPacket>, u32)>,
+    max_payload_len: usize,
+}
+
+impl ResendQueue {
+    pub fn new(max_payload_len: usize) -> Self {
+        Self {
+            max: 0,
+            resends: BTreeMap::new(),
+            max_payload_len,
+        }
+    }
+
+    pub fn add(&mut self, outp: OutPacket) {
+        if let Some((packet, count)) = self.resends.get_mut(&self.max) {
+            let length: usize = packet.iter().map(|out| out.length()).sum();
+            if length + outp.length() < self.max_payload_len && *count == 0 {
+                packet.push(outp);
+                return;
+            }
+        }
+        self.max += 1;
+        self.resends.insert(self.max, (vec![outp], 0));
+    }
+
+    pub fn get(&mut self) -> Option<(u32, Vec<OutPacket>, u32)> {
+        if let Some((index, (packet, count))) = self.resends.iter().next() {
+            return Some((*index, packet.clone(), *count));
+        }
+        None
+    }
+
+    pub fn timeout(&mut self, id: u32) {
+        if let Some((_, count)) = self.resends.get_mut(&id) {
+            *count += 1;
+        }
+    }
+
+    pub fn ack(&mut self, id: u32) {
+        self.resends.remove(&id);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.resends.is_empty()
+    }
+}
+
+struct ResendVal {
+    pub id: u32,
+    pub count: u32,
+}
+
 pub(crate) struct SendQueue {
     udp: Udp,
     addr: SocketAddr,
-    mtu: usize,
     max_payload_len: usize,
 
     //The frames to be sent are stacked here.
     buffer: VecDeque<OutPacket>,
     //Framesets waiting to be acked are stacked here.
-    sent: HashMap<u32, (Instant, Vec<OutPacket>)>,
+    sent: HashMap<u32, (Instant, Vec<OutPacket>, Option<ResendVal>)>,
 
-    timeouted: VecDeque<OutPacket>,
-
+    timeouted: ResendQueue,
     //Recovery time objective. If the Ack is not received after this time, it is assumed that the packet was discarded.
     //
     rto: Duration,
     rtts: Option<Rtts>,
-    //Window size
+
     cubic: Cubic,
 
     nodelay: bool,
@@ -72,14 +123,14 @@ pub(crate) struct SendQueue {
 
 impl SendQueue {
     pub fn new(udp: Udp, addr: SocketAddr, mtu: usize) -> Self {
+        let max_payload_len = mtu - UDP_HEADER_LEN as usize - 4;
         Self {
-            mtu,
-            max_payload_len: mtu - UDP_HEADER_LEN as usize - 4, //
+            max_payload_len,
             udp,
             addr,
             buffer: VecDeque::new(),
             sent: HashMap::new(),
-            timeouted: VecDeque::new(),
+            timeouted: ResendQueue::new(max_payload_len),
             rto: Duration::from_secs(1),
             rtts: None,
             cubic: Cubic::new(),
@@ -104,13 +155,17 @@ impl SendQueue {
     pub async fn ack(&mut self, ack: Ack) -> std::io::Result<()> {
         if ack.ack.sequences.0 < ack.ack.sequences.1 + 1 {
             for seq in ack.ack.sequences.0..ack.ack.sequences.1 + 1 {
-                if seq == ack.ack.sequences.1 && self.sent.contains_key(&seq) {
+                if let Some((time, _, resend)) = self.sent.remove(&seq) {
                     let now = Instant::now();
-                    let rtt = self.sent.get(&seq).unwrap().0.duration_since(now);
+                    let rtt = time.duration_since(now);
                     self.compute_rto(rtt);
+
+                    if let Some(val) = resend {
+                        self.timeouted.ack(val.id);
+                    }
+
+                    self.send_next().await?;
                 }
-                self.sent.remove(&seq);
-                self.send_next().await?;
             }
         }
         Ok(())
@@ -147,47 +202,38 @@ impl SendQueue {
     }
 
     async fn resend_nack(&mut self, seq: u32) -> std::io::Result<()> {
-        if let Some((_, sent)) = self.sent.remove(&seq) {
+        if let Some((_, sent, resend)) = self.sent.remove(&seq) {
+            //
+            let mut resends = vec![];
+            if let Some(val) = resend {
+                self.timeouted.ack(val.id);
+            }
             for out in sent {
                 if out.frame.reliability.reliable() {
-                    self.buffer.push_front(out);
+                    resends.push(out);
                 }
+            }
+            for re in resends {
+                self.buffer.push_front(re);
             }
             self.send_next().await?;
         }
         Ok(())
     }
 
-    fn get_next(&mut self) -> Vec<OutPacket> {
+    fn get_next(&mut self) -> (Vec<OutPacket>, Option<ResendVal>) {
         //sendable packets , is fragment
         let mut packets = vec![];
         let mut length = 0;
 
-        if !self.timeouted.is_empty() {
-            /*loop {
-                if self.timeouted.front().is_some() {
-                    let packet = self.timeouted.front().unwrap();
-                    let packet_len = packet.length();
-                    if packet_len + length < self.max_payload_len {
-                        packets.push(self.buffer.front().unwrap().clone());
-                        length += packet_len;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }*/
-            for timeouted in self.timeouted.iter() {
-                let packet_len = timeouted.length();
-                if packet_len + length < self.max_payload_len {
-                    packets.push(timeouted.clone());
-                    length += packet_len;
-                } else {
-                    break;
-                }
-            }
-            return packets;
+        if let Some(next) = self.timeouted.get() {
+            return (
+                next.1,
+                Some(ResendVal {
+                    id: next.0,
+                    count: next.2,
+                }),
+            );
         }
 
         loop {
@@ -204,7 +250,7 @@ impl SendQueue {
                 break;
             }
         }
-        packets
+        (packets, None)
     }
 
     async fn send_next(&mut self) -> std::io::Result<()> {
@@ -217,24 +263,28 @@ impl SendQueue {
         }
 
         if self.nodelay {
-            let sendable = self.get_next();
-            self.send_frameset(sendable).await?;
+            let (sendable, resend) = self.get_next();
+            self.send_frameset(sendable, resend).await?;
         } else {
             if self.sent.is_empty() {
-                let sendable = self.get_next();
-                self.send_frameset(sendable).await?;
+                let (sendable, resend) = self.get_next();
+                self.send_frameset(sendable, resend).await?;
                 return Ok(());
             }
             let size: usize = self.buffer.iter().map(|x| x.length()).sum();
             if size > self.max_payload_len {
-                let sendable = self.get_next();
-                self.send_frameset(sendable).await?;
+                let (sendable, resend) = self.get_next();
+                self.send_frameset(sendable, resend).await?;
             }
         }
         Ok(())
     }
 
-    async fn send_frameset(&mut self, frames: Vec<OutPacket>) -> std::io::Result<()> {
+    async fn send_frameset(
+        &mut self,
+        frames: Vec<OutPacket>,
+        resend: Option<ResendVal>,
+    ) -> std::io::Result<()> {
         let mut buff = vec![];
         let mut writer = std::io::Cursor::new(&mut buff);
         let id = DATAGRAM_FLAG | NEEDS_B_AND_AS_FLAG;
@@ -246,7 +296,8 @@ impl SendQueue {
         }
         self.udp.send_to(&buff, self.addr).await?;
 
-        self.sent.insert(self.sequence, (Instant::now(), frames));
+        self.sent
+            .insert(self.sequence, (Instant::now(), frames, resend));
         self.sequence += 1;
         Ok(())
     }
@@ -369,11 +420,20 @@ impl SendQueue {
                 self.rto = MAX_RTO;
             }
         }
-        let (_, sent) = self.sent.remove(&seq).unwrap();
+        let (_, sent, resend) = self.sent.remove(&seq).unwrap();
+
+        if let Some(val) = resend {
+            self.rto *= 2;
+            if self.rto > MAX_RTO {
+                self.rto = MAX_RTO;
+            }
+
+            self.timeouted.timeout(val.id)
+        }
 
         for out in sent {
             if out.frame.reliability.reliable() {
-                self.timeouted.push_back(out);
+                self.timeouted.add(out);
             }
         }
         self.send_next().await
