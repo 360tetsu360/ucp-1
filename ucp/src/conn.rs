@@ -102,7 +102,7 @@ impl Conn {
         Ok(())
     }
 
-    /*pub async fn send_syspacket<T: SystemPacket>(
+    pub async fn send_syspacket<T: SystemPacket>(
         &mut self,
         packet: T,
         reliability: Reliability,
@@ -111,7 +111,7 @@ impl Conn {
         encode_syspacket(packet, &mut bytes)?;
         self.send.send(bytes, reliability).await?;
         Ok(())
-    }*/
+    }
 
     async fn send_ack(&self, seqs: (u32, u32)) -> std::io::Result<()> {
         let ack = Ack {

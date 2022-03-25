@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, future::Future, net::SocketAddr, sync::Arc};
 
 use conn::Conn;
 use packet_derive::*;
@@ -65,17 +65,28 @@ impl UcpSession {
         }
     }
 
-    pub async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
+    pub async fn recv(&mut self) -> Vec<u8> {
         loop {
             if let Some(packet) = self.receiver.recv().await {
-                //handle packet here
-                return Ok(packet);
+                return packet;
             }
         }
     }
 
     pub async fn send(&self, bytes: &[u8], reliability: Reliability) -> std::io::Result<()> {
         self.conn.lock().await.send(bytes, reliability).await
+    }
+
+    pub(crate) async fn send_syspacket<P: SystemPacket>(
+        &self,
+        packet: P,
+        reliability: Reliability,
+    ) -> std::io::Result<()> {
+        self.conn
+            .lock()
+            .await
+            .send_syspacket(packet, reliability)
+            .await
     }
 
     pub async fn set_nodelay(&self, nodelay: bool) {
@@ -95,6 +106,28 @@ impl Drop for UcpSession {
         tokio::spawn(async move {
             s.send(addr).await.unwrap();
         });
+    }
+}
+
+async fn into_session(mut session: UcpSession) -> std::io::Result<UcpSession> {
+    loop {
+        let got = session.recv().await;
+        match got[0] {
+            ConnectionRequest::ID => {
+                let request: ConnectionRequest = decode_syspacket(&got)?;
+                let accept = ConnectionRequestAccepted {
+                    client_address: session.addr,
+                    system_index: 0,
+                    request_timestamp: request.time,
+                    accepted_timestamp: time(),
+                };
+                session
+                    .send_syspacket(accept, Reliability::ReliableOrdered)
+                    .await?;
+            }
+            NewIncomingConnections::ID => return Ok(session),
+            _ => {}
+        }
     }
 }
 
@@ -125,7 +158,9 @@ impl UcpListener {
             drop_sender: s,
         })
     }
-    pub async fn accept(&mut self) -> std::io::Result<UcpSession> {
+    pub async fn accept(
+        &mut self,
+    ) -> std::io::Result<impl Future<Output = Result<UcpSession, std::io::Error>>> {
         loop {
             let mut v = [0u8; 2048];
             let (size, src) = tokio::select! {
@@ -151,12 +186,12 @@ impl UcpListener {
                     OpenConnectionRequest1::ID => self.handle_ocrequest1(&v[..size], src).await?,
                     OpenConnectionRequest2::ID => {
                         let (conn, r) = self.handle_ocrequest2(&v[..size], src).await?;
-                        return Ok(UcpSession::init_with_conn(
+                        return Ok(into_session(UcpSession::init_with_conn(
                             conn,
                             r,
                             src,
                             self.drop_sender.clone(),
-                        ));
+                        )));
                     }
                     _ => {}
                 }
@@ -238,4 +273,12 @@ fn mtu(old: u16) -> u16 {
         return MAX_MTU_SIZE;
     }
     old
+}
+
+fn time() -> u64 {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    time as u64
 }
