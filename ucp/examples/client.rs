@@ -1,0 +1,24 @@
+use std::net::SocketAddr;
+
+use ucp::UcpSession;
+
+#[tokio::main]
+async fn main() {
+    let local: SocketAddr = "127.0.0.1:19130".parse().unwrap();
+    let remote: SocketAddr = "127.0.0.1:19132".parse().unwrap();
+    tokio::select! {
+        re = UcpSession::connect(local, remote, 0x114514) => {
+            handle(re.unwrap()).await;
+        },
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+    };
+}
+
+async fn handle(mut session: UcpSession) {
+    loop {
+        let packet = session.recv().await.unwrap();
+        if packet[0] == 0xfe {
+            println!("Game packet!");
+        }
+    }
+}

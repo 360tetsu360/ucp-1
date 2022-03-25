@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::Future, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
 use conn::Conn;
 use packet_derive::*;
@@ -7,6 +7,7 @@ use system_packets::*;
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
     sync::{mpsc, Mutex, Notify},
+    time::sleep,
 };
 
 pub(crate) mod conn;
@@ -27,17 +28,140 @@ pub struct UcpSession {
     receiver: mpsc::Receiver<Vec<u8>>,
     addr: SocketAddr,
     conn: Session,
+    udp: Option<Udp>,
 
     drop_notifyor: Arc<Notify>,
-    drop_sender: mpsc::Sender<SocketAddr>,
+    drop_sender: Option<mpsc::Sender<SocketAddr>>,
 }
 
 impl UcpSession {
+    pub async fn connect(
+        local: impl ToSocketAddrs,
+        remote: SocketAddr,
+        guid: u64,
+    ) -> std::io::Result<Self> {
+        let udp: Udp = Arc::new(UdpSocket::bind(local).await?);
+
+        let reply1: OpenConnectionReply1 = async {
+            for count in 0..12 {
+                let mtu = match count / 4 {
+                    0 => 1496,
+                    1 => 1202,
+                    2 => 584,
+                    _ => 0,
+                };
+                let ocrequest1 = OpenConnectionRequest1 {
+                    magic: (),
+                    protocol_version: PROTOCOL_VERSION,
+                    mtu_size: mtu,
+                };
+                let mut bytes = vec![];
+                encode_syspacket(ocrequest1, &mut bytes)?;
+                udp.send_to(&bytes, remote).await?;
+
+                let decode_ocreply1 = async {
+                    loop {
+                        let mut v = [0u8; 2048];
+                        let (size, src) = udp.recv_from(&mut v).await?;
+
+                        if src == remote {
+                            let reply: OpenConnectionReply1 = decode_syspacket(&v[..size])?;
+                            return Ok(reply);
+                        }
+                    }
+                };
+
+                tokio::select! {
+                    r = decode_ocreply1 => {
+                        return r
+                    },
+                    _ = sleep(Duration::from_millis(500)) => {}
+                }
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                format!("Failed to connect to {}", remote),
+            ))
+        }
+        .await?;
+
+        let reply2: OpenConnectionReply2 = async {
+            for _ in 0..4 {
+                let decode_ocreply2 = async {
+                    let ocrequest2 = OpenConnectionRequest2 {
+                        magic: (),
+                        address: remote,
+                        mtu: mtu(reply1.mtu_size),
+                        guid,
+                    };
+                    let mut bytes = vec![];
+                    encode_syspacket(ocrequest2, &mut bytes)?;
+                    udp.send_to(&bytes, remote).await?;
+                    loop {
+                        let mut v = [0u8; 2048];
+                        let (size, src) = udp.recv_from(&mut v).await?;
+                        if src == remote {
+                            return decode_syspacket::<OpenConnectionReply2>(&v[..size]);
+                        }
+                    }
+                };
+
+                tokio::select! {
+                    r = decode_ocreply2 => {
+                        return r
+                    },
+                    _ = sleep(Duration::from_secs(1)) => {}
+                }
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                format!("Failed to connect to {}", remote),
+            ))
+        }
+        .await?;
+
+        let (s, r) = mpsc::channel(128);
+        let conn = Arc::new(Mutex::new(Conn::new(
+            remote,
+            mtu(reply2.mtu) as usize,
+            udp.clone(),
+            s,
+        )));
+
+        let mut session = Self::init_with_conn(conn, r, remote, None, Some(udp));
+
+        let request = ConnectionRequest {
+            guid,
+            time: time(),
+            use_encryption: false,
+        };
+        session
+            .send_syspacket(request, Reliability::ReliableOrdered)
+            .await?;
+        loop {
+            let got = session.recv().await?;
+            if got[0] == ConnectionRequestAccepted::ID {
+                let accepted: ConnectionRequestAccepted =
+                    decode_syspacket::<ConnectionRequestAccepted>(&got)?;
+                let new_incoming = NewIncomingConnections {
+                    server_address: remote,
+                    request_timestamp: accepted.request_timestamp,
+                    accepted_timestamp: accepted.accepted_timestamp,
+                };
+                session
+                    .send_syspacket(new_incoming, Reliability::ReliableOrdered)
+                    .await?;
+                return Ok(session);
+            }
+        }
+    }
+
     fn init_with_conn(
         conn: Session,
         receiver: mpsc::Receiver<Vec<u8>>,
         addr: SocketAddr,
-        sender: mpsc::Sender<SocketAddr>,
+        sender: Option<mpsc::Sender<SocketAddr>>,
+        udp: Option<Udp>,
     ) -> Self {
         let ticker = conn.clone();
         let n1 = Arc::new(Notify::new());
@@ -45,7 +169,7 @@ impl UcpSession {
         tokio::spawn(async move {
             loop {
                 let tick = async {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    sleep(Duration::from_millis(100)).await;
                     ticker.lock().await.update().await.unwrap();
                 };
                 tokio::select! {
@@ -60,15 +184,23 @@ impl UcpSession {
             receiver,
             addr,
             conn,
+            udp,
             drop_notifyor: n2,
             drop_sender: sender,
         }
     }
 
-    pub async fn recv(&mut self) -> Vec<u8> {
+    pub async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
         loop {
+            if let Some(udp) = &self.udp {
+                let mut v = [0u8; 1500];
+                let (size, src) = udp.recv_from(&mut v).await?;
+                if src == self.addr {
+                    self.conn.lock().await.handle(&v[..size]).await?;
+                }
+            }
             if let Some(packet) = self.receiver.recv().await {
-                return packet;
+                return Ok(packet);
             }
         }
     }
@@ -100,18 +232,19 @@ impl UcpSession {
 
 impl Drop for UcpSession {
     fn drop(&mut self) {
-        let s = self.drop_sender.clone();
         self.drop_notifyor.notify_one();
-        let addr = self.addr;
-        tokio::spawn(async move {
-            s.send(addr).await.unwrap();
-        });
+        if let Some(s) = self.drop_sender.clone() {
+            let addr = self.addr;
+            tokio::spawn(async move {
+                s.send(addr).await.unwrap();
+            });
+        }
     }
 }
 
 async fn into_session(mut session: UcpSession) -> std::io::Result<UcpSession> {
     loop {
-        let got = session.recv().await;
+        let got = session.recv().await?;
         match got[0] {
             ConnectionRequest::ID => {
                 let request: ConnectionRequest = decode_syspacket(&got)?;
@@ -190,7 +323,8 @@ impl UcpListener {
                             conn,
                             r,
                             src,
-                            self.drop_sender.clone(),
+                            Some(self.drop_sender.clone()),
+                            None,
                         )));
                     }
                     _ => {}

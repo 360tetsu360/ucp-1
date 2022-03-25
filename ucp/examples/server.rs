@@ -26,7 +26,7 @@ async fn main() {
 
 async fn handle(mut session: UcpSession) {
     loop {
-        let packet = session.recv().await;
+        let packet = session.recv().await.unwrap();
         if packet[0] == 0xfe {
             println!("Game packet!");
         }
