@@ -18,6 +18,7 @@ pub(crate) mod send;
 pub(crate) mod system_packets;
 
 pub const PROTOCOL_VERSION: u8 = 0xA;
+pub const MAX_MTU_SIZE: u16 = 1400;
 
 type Udp = Arc<UdpSocket>;
 type Session = Arc<Mutex<Conn>>;
@@ -179,6 +180,7 @@ impl UcpListener {
 
     async fn handle_ocrequest1(&self, v: &[u8], src: SocketAddr) -> std::io::Result<()> {
         let packet: OpenConnectionRequest1 = decode_syspacket(v)?;
+
         if packet.protocol_version != PROTOCOL_VERSION {
             let reply = IncompatibleProtocolVersion {
                 server_protocol: PROTOCOL_VERSION,
@@ -194,7 +196,7 @@ impl UcpListener {
             magic: (),
             guid: self.guid,
             use_encryption: false,
-            mtu_size: packet.mtu_size,
+            mtu_size: mtu(packet.mtu_size),
         };
         let mut bytes = vec![];
         encode_syspacket(reply, &mut bytes)?;
@@ -208,11 +210,12 @@ impl UcpListener {
         src: SocketAddr,
     ) -> std::io::Result<(Session, mpsc::Receiver<Vec<u8>>)> {
         let packet: OpenConnectionRequest2 = decode_syspacket(v)?;
+        let mtu = mtu(packet.mtu);
         let reply = OpenConnectionReply2 {
             magic: (),
             guid: self.guid,
             address: src,
-            mtu: packet.mtu,
+            mtu,
             use_encryption: false,
         };
         let mut bytes = vec![];
@@ -221,11 +224,18 @@ impl UcpListener {
         let (s, r) = mpsc::channel(128);
         let session = Arc::new(Mutex::new(Conn::new(
             src,
-            packet.mtu as usize,
+            mtu as usize,
             self.socket.clone(),
             s,
         )));
         self.conns.insert(src, session.clone());
         Ok((session, r))
     }
+}
+
+fn mtu(old: u16) -> u16 {
+    if old > MAX_MTU_SIZE {
+        return MAX_MTU_SIZE;
+    }
+    old
 }

@@ -15,12 +15,12 @@ async fn main() {
 }
 
 async fn handle(mut session: UcpSession) {
-    loop{
+    loop {
         let packet = session.recv().await.unwrap();
         match packet[0] {
             0xfe => {
                 println!("Game packet!");
-            },
+            }
             _ => {}
         }
     }

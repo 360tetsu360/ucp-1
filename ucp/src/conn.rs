@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::packets::*;
 use crate::receive::ReceiveQueue;
-use crate::send::SendQueue;
+use crate::send::DatagramSender;
 use crate::system_packets::*;
 use crate::Udp;
 
@@ -14,20 +14,20 @@ const ACK_FLAG: u8 = 0x40;
 const NACK_FLAG: u8 = 0x20;
 
 pub(crate) struct Conn {
-    addr: SocketAddr,
-    socket: Udp,
+    address: SocketAddr,
+    udp: Udp,
     receive: ReceiveQueue,
-    send: SendQueue,
+    send: DatagramSender,
     received_sender: tokio::sync::mpsc::Sender<Vec<u8>>,
 }
 
 impl Conn {
-    pub fn new(addr: SocketAddr, mtu: usize, socket: Udp, sender: mpsc::Sender<Vec<u8>>) -> Self {
+    pub fn new(address: SocketAddr, mtu: usize, udp: Udp, sender: mpsc::Sender<Vec<u8>>) -> Self {
         Self {
-            addr,
-            socket: socket.clone(),
+            address,
+            udp: udp.clone(),
             receive: ReceiveQueue::new(),
-            send: SendQueue::new(socket, addr, mtu),
+            send: DatagramSender::new(udp, address, mtu),
             received_sender: sender,
         }
     }
@@ -98,11 +98,11 @@ impl Conn {
     }
 
     async fn send_bytes(&self, bytes: &[u8]) -> std::io::Result<()> {
-        self.socket.send_to(bytes, self.addr).await?;
+        self.udp.send_to(bytes, self.address).await?;
         Ok(())
     }
 
-    pub async fn send_syspacket<T: SystemPacket>(
+    /*pub async fn send_syspacket<T: SystemPacket>(
         &mut self,
         packet: T,
         reliability: Reliability,
@@ -111,7 +111,7 @@ impl Conn {
         encode_syspacket(packet, &mut bytes)?;
         self.send.send(bytes, reliability).await?;
         Ok(())
-    }
+    }*/
 
     async fn send_ack(&self, seqs: (u32, u32)) -> std::io::Result<()> {
         let ack = Ack {
