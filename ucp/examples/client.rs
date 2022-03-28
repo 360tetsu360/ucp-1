@@ -10,7 +10,7 @@ async fn main() {
         re = UcpSession::connect(local, remote, 0x114514) => {
             handle(re.unwrap()).await;
         },
-        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+        _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {}
     };
 }
 

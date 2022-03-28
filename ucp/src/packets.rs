@@ -84,28 +84,27 @@ impl Frame {
         }
         Ok(ret)
     }
-    pub fn encode(&self, bytes: &mut Vec<u8>) -> std::io::Result<()> {
-        let mut writer = CursorWriter::new(bytes);
+    pub fn encode(&self, writer : &mut CursorWriter) -> std::io::Result<()> {
         let mut flag = (self.reliability as u8) << 5;
         if self.fragment.is_some() {
             flag |= FRAGMENT_FLAG
         }
-        u8::encode(&flag, &mut writer)?;
-        Big::encode(&((self.length * 8) as u16), &mut writer)?;
+        u8::encode(&flag, writer)?;
+        Big::encode(&((self.length * 8) as u16), writer)?;
         if self.reliability.reliable() {
-            U24::encode(&self.mindex, &mut writer)?;
+            U24::encode(&self.mindex, writer)?;
         }
         if self.reliability.sequenced() {
-            U24::encode(&self.sindex, &mut writer)?;
+            U24::encode(&self.sindex, writer)?;
         }
         if self.reliability.ordered() {
-            U24::encode(&self.oindex, &mut writer)?;
-            u8::encode(&0, &mut writer)?;
+            U24::encode(&self.oindex, writer)?;
+            u8::encode(&0, writer)?;
         }
         if let Some(fragment) = &self.fragment {
-            Big::encode(&fragment.size, &mut writer)?;
-            Big::encode(&fragment.id, &mut writer)?;
-            Big::encode(&fragment.index, &mut writer)?;
+            Big::encode(&fragment.size, writer)?;
+            Big::encode(&fragment.id, writer)?;
+            Big::encode(&fragment.index, writer)?;
         }
         Ok(())
     }

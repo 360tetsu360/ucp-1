@@ -28,7 +28,6 @@ pub struct UcpSession {
     receiver: mpsc::Receiver<Vec<u8>>,
     addr: SocketAddr,
     conn: Session,
-    udp: Option<Udp>,
 
     drop_notifyor: Arc<Notify>,
     drop_sender: Option<mpsc::Sender<SocketAddr>>,
@@ -110,7 +109,7 @@ impl UcpSession {
                     r = decode_ocreply2 => {
                         return r
                     },
-                    _ = sleep(Duration::from_secs(1)) => {}
+                    _ = sleep(Duration::from_millis(500)) => {}
                 }
             }
             Err(std::io::Error::new(
@@ -169,36 +168,54 @@ impl UcpSession {
         tokio::spawn(async move {
             loop {
                 let tick = async {
-                    sleep(Duration::from_millis(100)).await;
+                    sleep(Duration::from_millis(50)).await;
                     ticker.lock().await.update().await.unwrap();
                 };
                 tokio::select! {
                     _ = tick => {},
-                    _ = n1.notified() => {
+                    _ = n2.notified() => {
                         break;
                     }
                 }
             }
         });
+
+        if let Some(udp) = udp {
+            let n3 = n1.clone();
+            let conn2 = conn.clone();
+            let address = addr;
+            tokio::spawn(async move {
+                loop {
+                    let mut v = [0u8; 1500];
+                    tokio::select! {
+                        res = udp.recv_from(&mut v) => {
+                            let (size,src) = match res {
+                                Ok(res) => res,
+                                Err(_) => continue,
+                            };
+                            if src == address {
+                                conn2.lock().await.handle(&v[..size]).await.unwrap_or_default();
+                            }
+                        },
+                        _ = n3.notified() => {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
         Self {
             receiver,
             addr,
             conn,
-            udp,
-            drop_notifyor: n2,
+            drop_notifyor: n1,
             drop_sender: sender,
         }
     }
 
     pub async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
         loop {
-            if let Some(udp) = &self.udp {
-                let mut v = [0u8; 1500];
-                let (size, src) = udp.recv_from(&mut v).await?;
-                if src == self.addr {
-                    self.conn.lock().await.handle(&v[..size]).await?;
-                }
-            }
             if let Some(packet) = self.receiver.recv().await {
                 return Ok(packet);
             }

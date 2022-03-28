@@ -30,6 +30,7 @@ pub(crate) fn encode_syspacket<T: SystemPacket>(
 
 #[derive(Den)]
 pub struct ConnectedPing {
+    #[den(with = "Big")]
     pub client_time_stamp: u64,
 }
 impl SystemPacket for ConnectedPing {
@@ -38,9 +39,11 @@ impl SystemPacket for ConnectedPing {
 
 #[derive(Den)]
 pub struct UnconnectedPing {
+    #[den(with = "Big")]
     pub time_stamp: u64,
     #[den(with = "MAGIC")]
     pub magic: (),
+    #[den(with = "Big")]
     pub guid: u64,
 }
 impl SystemPacket for UnconnectedPing {
@@ -49,7 +52,9 @@ impl SystemPacket for UnconnectedPing {
 
 #[derive(Den)]
 pub struct ConnectedPong {
+    #[den(with = "Big")]
     pub client_timestamp: u64,
+    #[den(with = "Big")]
     pub server_timestamp: u64,
 }
 impl SystemPacket for ConnectedPong {
@@ -89,8 +94,10 @@ impl SystemPacket for OpenConnectionRequest1 {
 pub struct OpenConnectionReply1 {
     #[den(with = "MAGIC")]
     pub magic: (),
+    #[den(with = "Big")]
     pub guid: u64,
     pub use_encryption: bool,
+    #[den(with = "Big")]
     pub mtu_size: u16,
 }
 impl SystemPacket for OpenConnectionReply1 {
@@ -102,7 +109,9 @@ pub struct OpenConnectionRequest2 {
     #[den(with = "MAGIC")]
     pub magic: (),
     pub address: SocketAddr,
+    #[den(with = "Big")]
     pub mtu: u16,
+    #[den(with = "Big")]
     pub guid: u64,
 }
 impl SystemPacket for OpenConnectionRequest2 {
@@ -113,8 +122,10 @@ impl SystemPacket for OpenConnectionRequest2 {
 pub struct OpenConnectionReply2 {
     #[den(with = "MAGIC")]
     pub magic: (),
+    #[den(with = "Big")]
     pub guid: u64,
     pub address: SocketAddr,
+    #[den(with = "Big")]
     pub mtu: u16,
     pub use_encryption: bool,
 }
@@ -124,7 +135,9 @@ impl SystemPacket for OpenConnectionReply2 {
 
 #[derive(Den)]
 pub struct ConnectionRequest {
+    #[den(with = "Big")]
     pub guid: u64,
+    #[den(with = "Big")]
     pub time: u64,
     pub use_encryption: bool,
 }
@@ -216,7 +229,9 @@ impl SystemPacket for DisconnectionNotification {
 
 #[derive(Den)]
 pub struct UnconnectedPong {
+    #[den(with = "Big")]
     pub time: u64,
+    #[den(with = "Big")]
     pub guid: u64,
     #[den(with = "MAGIC")]
     pub magic: (),
@@ -231,6 +246,7 @@ pub struct IncompatibleProtocolVersion {
     pub server_protocol: u8,
     #[den(with = "MAGIC")]
     pub magic: (),
+    #[den(with = "Big")]
     pub server_guid: u64,
 }
 impl SystemPacket for IncompatibleProtocolVersion {
