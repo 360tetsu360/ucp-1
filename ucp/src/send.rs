@@ -7,6 +7,7 @@ use crate::{
 };
 use packet_derive::*;
 use std::{
+    cmp,
     collections::VecDeque,
     net::SocketAddr,
     time::{Duration, Instant},
@@ -15,6 +16,8 @@ use std::{
 const UDP_HEADER: usize = 32;
 const DATAGRAM_FLAG: u8 = 0x80;
 const NEEDS_B_AND_AS_FLAG: u8 = 0x4;
+const MAX_RTO: Duration = Duration::from_secs(10);
+const MIN_RTO: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub(crate) struct OutPacket {
@@ -40,6 +43,42 @@ struct SentConf {
     pub time: Instant,
 }
 
+struct Rtts {
+    pub srtt: Duration,
+    pub rttvar: Duration,
+}
+
+struct Rto {
+    pub rto: Duration,
+    rtts: Option<Rtts>,
+}
+
+impl Rto {
+    pub fn new() -> Self {
+        Self {
+            rto: Duration::from_secs(1),
+            rtts: None,
+        }
+    }
+
+    pub fn compute(&mut self, rtt: Duration) {
+        if let Some(rtts) = self.rtts.as_mut() {
+            let new_rttvar = rtts.rttvar.mul_f32(0.75) + absolute_div(rtts.srtt, rtt).mul_f32(0.25);
+            let new_srtt = rtts.srtt.mul_f32(0.875) + rtt.mul_f32(0.125);
+            let mut rto = rtts.srtt + 4 * rtts.rttvar;
+            rto = cmp::max(cmp::min(rto, MAX_RTO), MIN_RTO);
+            self.rto = rto;
+            rtts.srtt = new_srtt;
+            rtts.rttvar = new_rttvar;
+        } else {
+            let srtt = rtt;
+            let rttvar = rtt / 2;
+            self.rto = srtt + 4 * rttvar;
+            self.rtts = Some(Rtts { srtt, rttvar });
+        }
+    }
+}
+
 pub(crate) struct DatagramSender {
     udp: Udp,
     address: SocketAddr,
@@ -50,7 +89,7 @@ pub(crate) struct DatagramSender {
 
     cubic: Cubic,
 
-    rto: Duration,
+    rto: Rto,
 
     sequence: u32,
 
@@ -72,7 +111,7 @@ impl DatagramSender {
             buffer: VecDeque::new(),
             sent: vec![],
             cubic: Cubic::new(mtu),
-            rto: Duration::from_secs(5),
+            rto: Rto::new(),
             sequence: 0,
             mindex: 0,
             sindex: 0,
@@ -252,7 +291,7 @@ impl DatagramSender {
             let rtt = Instant::now().duration_since(time);
             self.cubic.on_ack(ack_cnt, rtt);
 
-            // TODO : compute rto
+            self.rto.compute(rtt);
         }
 
         Ok(())
@@ -291,7 +330,7 @@ impl DatagramSender {
             .buffer
             .iter_mut()
             .filter(|p| p.1.is_some())
-            .filter(|(_, conf, _)| now.duration_since(conf.as_ref().unwrap().time) > self.rto);
+            .filter(|(_, conf, _)| now.duration_since(conf.as_ref().unwrap().time) > self.rto.rto);
 
         for (stack, conf, count) in timeouted {
             while let Some(out) = stack.pop() {
@@ -322,5 +361,13 @@ impl DatagramSender {
 
     pub fn nodelay(&self) -> bool {
         self.nodelay
+    }
+}
+
+fn absolute_div(p: Duration, o: Duration) -> Duration {
+    if p > o {
+        p - o
+    } else {
+        o - p
     }
 }
