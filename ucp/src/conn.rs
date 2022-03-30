@@ -146,7 +146,9 @@ impl Conn {
     pub async fn update(&mut self) -> std::io::Result<()> {
         self.flush_ack().await?;
         self.flush_nack().await?;
-        self.send.tick().await?;
+        if self.send.tick().await? {
+            // TODO : disconnected
+        }
         Ok(())
     }
 

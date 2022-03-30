@@ -15,11 +15,11 @@ pub(crate) struct Cubic {
     cwnd_inc: u32,
 
     ssthresh: u32,
-    last_reduction: Option<Instant>,
+    recovery_start_time: Option<Instant>,
 }
 
 impl Cubic {
-    pub fn new(mtu: u16) -> Self {
+    pub fn new(mtu: usize) -> Self {
         Self {
             min_window: 2,
             wmax: 0.,
@@ -27,7 +27,7 @@ impl Cubic {
             cwnd: iw(mtu),
             cwnd_inc: 0,
             ssthresh: u32::MAX,
-            last_reduction: None,
+            recovery_start_time: None,
         }
     }
 
@@ -56,13 +56,13 @@ impl Cubic {
             let now = Instant::now();
             let ca_start_time;
 
-            match self.last_reduction {
+            match self.recovery_start_time {
                 Some(t) => ca_start_time = t,
                 None => {
                     // When we come here without congestion_event() triggered,
                     // initialize congestion_recovery_start_time, w_max and k.
                     ca_start_time = now;
-                    self.last_reduction = Some(now);
+                    self.recovery_start_time = Some(now);
 
                     self.wmax = self.cwnd as f64;
                     self.k = 0.0;
@@ -101,9 +101,9 @@ impl Cubic {
         }
     }
 
-    pub fn on_congestion_event(&mut self, sent: Instant, is_persistent_congestion: bool) {
+    pub fn on_congestion_event(&mut self, sent: Instant) {
         if self
-            .last_reduction
+            .recovery_start_time
             .map(|recovery_start_time| sent <= recovery_start_time)
             .unwrap_or(false)
         {
@@ -111,7 +111,7 @@ impl Cubic {
         }
 
         let now = Instant::now();
-        self.last_reduction = Some(now);
+        self.recovery_start_time = Some(now);
 
         if (self.cwnd as f64) < self.wmax {
             self.wmax = self.cwnd as f64 * (1.0 + BETA_CUBIC) / 2.0;
@@ -119,28 +119,16 @@ impl Cubic {
             self.wmax = self.cwnd as f64;
         }
 
-        self.ssthresh = cmp::max((self.wmax * BETA_CUBIC) as u32, self.min_window);
+        self.ssthresh = cmp::max((self.wmax * BETA_CUBIC) as u32, 2); // minimum window size
 
         self.cwnd = self.ssthresh;
         self.k = self.k();
 
         self.cwnd_inc = (self.cwnd_inc as f64 * BETA_CUBIC) as u32;
-
-        if is_persistent_congestion {
-            self.last_reduction = None;
-            self.wmax = self.cwnd as f64;
-
-            // 4.7 Timeout - reduce ssthresh based on BETA_CUBIC
-            self.ssthresh = cmp::max((self.cwnd as f64 * BETA_CUBIC) as u32, self.min_window);
-
-            self.cwnd_inc = 0;
-
-            self.cwnd = self.min_window;
-        }
     }
 }
 
-fn iw(mtu: u16) -> u32 {
+fn iw(mtu: usize) -> u32 {
     if mtu > 1095 {
         return 3;
     }
