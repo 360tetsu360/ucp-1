@@ -84,7 +84,7 @@ impl Frame {
         }
         Ok(ret)
     }
-    pub fn encode(&self, writer : &mut CursorWriter) -> std::io::Result<()> {
+    pub fn encode(&self, writer: &mut CursorWriter) -> std::io::Result<()> {
         let mut flag = (self.reliability as u8) << 5;
         if self.fragment.is_some() {
             flag |= FRAGMENT_FLAG

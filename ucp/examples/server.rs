@@ -10,12 +10,10 @@ async fn main() {
         .unwrap();
     loop {
         let into_session = ucp.accept().await.unwrap();
-        dbg!();
         tokio::spawn(async move {
             tokio::select! {
                 re = into_session => {
                     if let Ok(session) = re {
-                        dbg!();
                         handle(session).await
                     }
                 },

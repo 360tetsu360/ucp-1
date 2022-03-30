@@ -45,7 +45,7 @@ impl UcpSession {
             for count in 0..12 {
                 let mtu = match count / 4 {
                     0 => 1496,
-                    1 => 1202,
+                    1 => 1204,
                     2 => 584,
                     _ => 0,
                 };

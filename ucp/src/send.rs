@@ -1,25 +1,46 @@
-use std::net::SocketAddr;
-use packet_derive::*;
 use crate::{
-    packets::{Reliability, Frame},
+    packets::{Frame, Reliability},
     system_packets::{Ack, Nack},
     Udp,
 };
+use packet_derive::*;
+use std::{collections::VecDeque, net::SocketAddr};
 
 const UDP_HEADER: usize = 32;
 const DATAGRAM_FLAG: u8 = 0x80;
 const NEEDS_B_AND_AS_FLAG: u8 = 0x4;
+
+#[derive(Clone)]
+pub(crate) struct OutPacket {
+    pub frame: Frame,
+    pub data: Vec<u8>,
+}
+
+impl OutPacket {
+    pub fn length(&self) -> usize {
+        self.frame.length as usize
+            + Frame::size(self.frame.reliability, self.frame.fragment.is_some())
+    }
+    pub fn encode(&self) -> std::io::Result<Vec<u8>> {
+        let mut frame_bytes = vec![];
+        let mut writer = std::io::Cursor::new(&mut frame_bytes);
+        self.frame.encode(&mut writer)?;
+        Ok([frame_bytes, self.data.clone()].concat()) // Fix : don't clone
+    }
+}
 
 pub(crate) struct DatagramSender {
     udp: Udp,
     address: SocketAddr,
     max_payload_len: usize, //MTU size - 32(UDP Header) - 1(ID) - 3(Sequence Number)
 
-    sequence : u32,
+    buffer: VecDeque<Vec<OutPacket>>,
 
-    mindex : u32,
-    sindex : u32,
-    oindex : u32,
+    sequence: u32,
+
+    mindex: u32,
+    sindex: u32,
+    oindex: u32,
 
     nodelay: bool,
 }
@@ -30,10 +51,11 @@ impl DatagramSender {
             udp,
             address,
             max_payload_len: mtu - UDP_HEADER - 4,
-            sequence : 0,
-            mindex : 0,
-            sindex : 0,
-            oindex : 0,
+            buffer: VecDeque::new(),
+            sequence: 0,
+            mindex: 0,
+            sindex: 0,
+            oindex: 0,
             nodelay: false,
         }
     }
@@ -42,7 +64,11 @@ impl DatagramSender {
         Ok(())
     }
 
-    pub async fn send(&mut self, mut bytes: Vec<u8>, reliability: Reliability) -> std::io::Result<()> {
+    pub async fn send(
+        &mut self,
+        mut bytes: Vec<u8>,
+        reliability: Reliability,
+    ) -> std::io::Result<()> {
         let mut frame = Frame {
             reliability,
             length: bytes.len() as u16,
