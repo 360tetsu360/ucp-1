@@ -1,6 +1,6 @@
 use crate::{
     cubic::Cubic,
-    packets::{Frame, Reliability,FragmentHeader},
+    packets::{FragmentHeader, Frame, Reliability},
     system_packets::{Ack, Nack},
     Udp,
 };
