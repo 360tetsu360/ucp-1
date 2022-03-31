@@ -116,7 +116,7 @@ impl DatagramSender {
             sindex: 0,
             oindex: 0,
             fragment_id: 0,
-            nodelay: false,
+            nodelay: true,
         }
     }
 
@@ -177,7 +177,11 @@ impl DatagramSender {
         }
     }
 
-    pub async fn send(&mut self, bytes: Vec<u8>, reliability: Reliability) -> std::io::Result<()> {
+    pub async fn send(
+        &mut self,
+        mut bytes: Vec<u8>,
+        reliability: Reliability,
+    ) -> std::io::Result<()> {
         let mut frame = Frame {
             reliability,
             length: bytes.len() as u16,
@@ -198,6 +202,18 @@ impl DatagramSender {
             frame.oindex = self.oindex;
             self.oindex += 1;
         }
+
+        /*let mut buff = vec![];
+        let mut writer = std::io::Cursor::new(&mut buff);
+        let id = DATAGRAM_FLAG | NEEDS_B_AND_AS_FLAG;
+
+        u8::encode(&id, &mut writer)?;
+        U24::encode(&self.sequence, &mut writer)?;
+        frame.encode(&mut writer)?;
+        buff.append(&mut bytes);
+        self.udp.send_to(&buff, self.address).await?;
+
+        self.sequence += 1;*/
 
         let out_packet = OutPacket { frame, data: bytes };
         self.push_outpacket(out_packet);
@@ -332,11 +348,13 @@ impl DatagramSender {
             .filter(|(_, conf, _)| now.duration_since(conf.as_ref().unwrap().time) > self.rto.rto);
 
         for (stack, conf, count) in timeouted {
+            let mut resends = vec![];
             while let Some(out) = stack.pop() {
                 if out.frame.reliability.reliable() {
-                    stack.insert(0, out);
+                    resends.insert(0, out);
                 }
             }
+            *stack = resends;
             *conf = None;
 
             if let Some(count) = count {
