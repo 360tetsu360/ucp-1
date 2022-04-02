@@ -262,14 +262,13 @@ impl Den for Acknowledge {
     fn decode(bytes: &mut CursorReader) -> std::io::Result<Self> {
         let record_count = Big::decode(bytes)?;
         let max_equals_min = bool::decode(bytes)?;
-        let sequences;
         let sequence = U24::decode(bytes)?;
-        if max_equals_min {
-            sequences = (sequence, sequence)
+        let sequences = if max_equals_min {
+            (sequence, sequence)
         } else {
             let sequence_max = U24::decode(bytes)?;
-            sequences = (sequence, sequence_max)
-        }
+            (sequence, sequence_max)
+        };
         Ok(Self {
             record_count,
             max_equals_min,

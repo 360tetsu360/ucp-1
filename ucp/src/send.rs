@@ -42,9 +42,9 @@ struct SentConf {
     pub time: Instant,
 }
 
-const ALPHA : f32 = 0.125;
-const BETA : f32 = 0.25;
-const K : u32 = 1;
+const ALPHA: f32 = 0.125;
+const BETA: f32 = 0.25;
+const K: u32 = 1;
 
 struct Rtts {
     pub srtt: Duration,
@@ -66,7 +66,8 @@ impl Rto {
 
     pub fn compute(&mut self, rtt: Duration) {
         if let Some(rtts) = self.rtts.as_mut() {
-            let new_rttvar = rtts.rttvar.mul_f32(1. - BETA) + absolute_div(rtts.srtt, rtt).mul_f32(BETA);
+            let new_rttvar =
+                rtts.rttvar.mul_f32(1. - BETA) + absolute_div(rtts.srtt, rtt).mul_f32(BETA);
             let new_srtt = rtts.srtt.mul_f32(1. - ALPHA) + rtt.mul_f32(ALPHA);
             let mut rto = rtts.srtt + K * rtts.rttvar;
             rto = cmp::max(cmp::min(rto, MAX_RTO), MIN_RTO);
@@ -97,7 +98,7 @@ pub(crate) struct DatagramSender {
 
     sequence: u32,
 
-    is_congestion : bool,
+    is_congestion: bool,
 
     mindex: u32,
     sindex: u32,
@@ -119,7 +120,7 @@ impl DatagramSender {
             cubic: Cubic::new(mtu),
             rto: Rto::new(),
             sequence: 0,
-            is_congestion : false,
+            is_congestion: false,
             mindex: 0,
             sindex: 0,
             oindex: 0,
@@ -183,11 +184,7 @@ impl DatagramSender {
         }
     }
 
-    pub async fn send(
-        &mut self,
-        bytes: Vec<u8>,
-        reliability: Reliability,
-    ) -> std::io::Result<()> {
+    pub async fn send(&mut self, bytes: Vec<u8>, reliability: Reliability) -> std::io::Result<()> {
         let mut frame = Frame {
             reliability,
             length: bytes.len() as u16,
@@ -290,14 +287,12 @@ impl DatagramSender {
                     .iter()
                     .position(|(_, x, _)| x.as_ref().unwrap().sequence == seq)
                     .unwrap();
-                
+
                 let sent_packet = self.buffer.remove(index).unwrap();
                 sent = Some(sent_packet.1.as_ref().unwrap().time);
-                
-                if let Some(_) = sent_packet.2 {
-                    if self.buffer.iter().all(|p|p.2.is_none()) {
-                        self.is_congestion = false;
-                    }
+
+                if sent_packet.2.is_some() && self.buffer.iter().all(|p| p.2.is_none()) {
+                    self.is_congestion = false;
                 }
 
                 self.send_next().await?;
@@ -336,7 +331,7 @@ impl DatagramSender {
                 self.buffer[index].1 = None;
             }
         }
-        
+
         if let Some(time) = sent {
             self.cubic.on_congestion_event(time);
 
@@ -364,7 +359,7 @@ impl DatagramSender {
             let mut resends = vec![];
             while let Some(out) = stack.pop() {
                 if out.frame.reliability.reliable() {
-                    resends.push(out);
+                    resends.insert(0, out);
                 }
             }
             *stack = resends;
@@ -375,7 +370,6 @@ impl DatagramSender {
             let index = self.sent.iter().position(|x| *x == seq).unwrap();
             self.sent.remove(index);
 
-
             *conf = None;
 
             if let Some(count) = count {
@@ -384,6 +378,8 @@ impl DatagramSender {
                     return Ok(true);
                 }
                 *count += 1;
+            } else {
+                *count = Some(1)
             }
         }
 
@@ -391,7 +387,7 @@ impl DatagramSender {
             if !self.is_congestion {
                 // congestion event.
                 self.cubic.on_congestion_event(time);
-                self.rto.rto = cmp::min(self.rto.rto * 2,MAX_RTO);
+                self.rto.rto = cmp::min(self.rto.rto * 2, MAX_RTO);
                 self.is_congestion = true;
             }
 

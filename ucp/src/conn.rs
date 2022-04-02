@@ -1,15 +1,17 @@
 use packet_derive::*;
 use std::io::Cursor;
 use std::net::SocketAddr;
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
-use crate::ConnEvent;
 use crate::packets::*;
 use crate::receive::ReceiveQueue;
 use crate::send::DatagramSender;
 use crate::system_packets::*;
-use crate::Udp;
 use crate::time;
+use crate::ConnEvent;
+use crate::Udp;
 
 const DATAGRAM_FLAG: u8 = 0x80;
 const ACK_FLAG: u8 = 0x40;
@@ -21,6 +23,8 @@ pub(crate) struct Conn {
     receive: ReceiveQueue,
     send: DatagramSender,
     received_sender: tokio::sync::mpsc::Sender<ConnEvent>,
+
+    last_ping: Instant,
 }
 
 impl Conn {
@@ -31,6 +35,7 @@ impl Conn {
             receive: ReceiveQueue::new(),
             send: DatagramSender::new(udp, address, mtu),
             received_sender: sender,
+            last_ping: Instant::now(),
         }
     }
 
@@ -91,7 +96,10 @@ impl Conn {
         match u8::decode(&mut reader)? {
             ConnectedPing::ID => {
                 let ping = decode_syspacket::<ConnectedPing>(&bytes[..])?;
-                let pong = ConnectedPong { client_timestamp: ping.client_timestamp, server_timestamp: time() };
+                let pong = ConnectedPong {
+                    client_timestamp: ping.client_timestamp,
+                    server_timestamp: time(),
+                };
                 self.send_syspacket(pong, Reliability::Reliable).await?;
             }
             ConnectedPong::ID => {}
@@ -156,6 +164,11 @@ impl Conn {
         if self.send.tick().await? {
             self.notify(ConnEvent::Timeout).await;
         }
+        let now = Instant::now();
+        if now.duration_since(self.last_ping) > Duration::from_millis(4500) {
+            self.ping().await?;
+            self.last_ping = now;
+        }
         Ok(())
     }
 
@@ -173,16 +186,25 @@ impl Conn {
         Ok(())
     }
 
-    async fn notify(&mut self,event : ConnEvent) {
-        match self.received_sender.send(event).await {
-            Err(_) => todo!(),
-            _ => {},
-        }
+    async fn ping(&mut self) -> std::io::Result<()> {
+        let ping = ConnectedPing {
+            client_timestamp: time(),
+        };
+        self.send_syspacket(ping, Reliability::Reliable).await?;
+        Ok(())
+    }
+
+    async fn notify(&mut self, event: ConnEvent) {
+        self.received_sender
+            .send(event)
+            .await
+            .expect("failed to send event");
     }
 
     async fn disconnect(&mut self) -> std::io::Result<()> {
-        let disconnectionnotifycation = DisconnectionNotification{};
-        self.send_syspacket(disconnectionnotifycation,Reliability::ReliableOrdered).await?;
+        let disconnectionnotifycation = DisconnectionNotification {};
+        self.send_syspacket(disconnectionnotifycation, Reliability::ReliableOrdered)
+            .await?;
         Ok(())
     }
 
