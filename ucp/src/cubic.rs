@@ -7,7 +7,6 @@ const BETA_CUBIC: f64 = 0.7;
 const C: f64 = 0.4;
 
 pub(crate) struct Cubic {
-    min_window: u32,
     wmax: f64,
     k: f64,
 
@@ -21,7 +20,6 @@ pub(crate) struct Cubic {
 impl Cubic {
     pub fn new(mtu: usize) -> Self {
         Self {
-            min_window: 2,
             wmax: 0.,
             k: 0.,
             cwnd: iw(mtu),

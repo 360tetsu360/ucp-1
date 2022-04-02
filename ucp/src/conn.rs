@@ -3,11 +3,13 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
+use crate::ConnEvent;
 use crate::packets::*;
 use crate::receive::ReceiveQueue;
 use crate::send::DatagramSender;
 use crate::system_packets::*;
 use crate::Udp;
+use crate::time;
 
 const DATAGRAM_FLAG: u8 = 0x80;
 const ACK_FLAG: u8 = 0x40;
@@ -18,11 +20,11 @@ pub(crate) struct Conn {
     udp: Udp,
     receive: ReceiveQueue,
     send: DatagramSender,
-    received_sender: tokio::sync::mpsc::Sender<Vec<u8>>,
+    received_sender: tokio::sync::mpsc::Sender<ConnEvent>,
 }
 
 impl Conn {
-    pub fn new(address: SocketAddr, mtu: usize, udp: Udp, sender: mpsc::Sender<Vec<u8>>) -> Self {
+    pub fn new(address: SocketAddr, mtu: usize, udp: Udp, sender: mpsc::Sender<ConnEvent>) -> Self {
         Self {
             address,
             udp: udp.clone(),
@@ -87,12 +89,17 @@ impl Conn {
     async fn handle_incoming_packet(&mut self, bytes: Vec<u8>) -> std::io::Result<()> {
         let mut reader = Cursor::new(&bytes[..]);
         match u8::decode(&mut reader)? {
-            ConnectedPing::ID => {}
+            ConnectedPing::ID => {
+                let ping = decode_syspacket::<ConnectedPing>(&bytes[..])?;
+                let pong = ConnectedPong { client_timestamp: ping.client_timestamp, server_timestamp: time() };
+                self.send_syspacket(pong, Reliability::Reliable).await?;
+            }
             ConnectedPong::ID => {}
-            _ => match self.received_sender.send(bytes).await {
-                Ok(_) => {}
-                Err(_) => todo!(),
-            },
+            DisconnectionNotification::ID => {
+                self.disconnect().await?;
+                self.disconnected().await;
+            }
+            _ => self.notify(ConnEvent::Packet(bytes)).await,
         }
         Ok(())
     }
@@ -147,7 +154,7 @@ impl Conn {
         self.flush_ack().await?;
         self.flush_nack().await?;
         if self.send.tick().await? {
-            // TODO : disconnected
+            self.notify(ConnEvent::Timeout).await;
         }
         Ok(())
     }
@@ -164,6 +171,23 @@ impl Conn {
             self.send_nack(nacks).await?
         }
         Ok(())
+    }
+
+    async fn notify(&mut self,event : ConnEvent) {
+        match self.received_sender.send(event).await {
+            Err(_) => todo!(),
+            _ => {},
+        }
+    }
+
+    async fn disconnect(&mut self) -> std::io::Result<()> {
+        let disconnectionnotifycation = DisconnectionNotification{};
+        self.send_syspacket(disconnectionnotifycation,Reliability::ReliableOrdered).await?;
+        Ok(())
+    }
+
+    async fn disconnected(&mut self) {
+        self.notify(ConnEvent::Disconnected).await
     }
 
     pub fn set_nodelay(&mut self, nodelay: bool) {

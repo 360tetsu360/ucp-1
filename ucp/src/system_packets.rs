@@ -31,7 +31,7 @@ pub(crate) fn encode_syspacket<T: SystemPacket>(
 #[derive(Den)]
 pub struct ConnectedPing {
     #[den(with = "Big")]
-    pub client_time_stamp: u64,
+    pub client_timestamp: u64,
 }
 impl SystemPacket for ConnectedPing {
     const ID: u8 = 0x0;

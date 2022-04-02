@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use ucp::{UcpListener, UcpSession};
+use ucp::{UcpListener, UcpSession, Reliability};
 
 #[tokio::main]
 async fn main() {
@@ -25,8 +25,12 @@ async fn main() {
 
 async fn handle(mut session: UcpSession) {
     loop {
-        let packet = session.recv().await.unwrap();
+        let packet = match session.recv().await {
+            Ok(payload) => payload,
+            Err(_) => return,
+        };
         if packet[0] == 0xfe {
+            session.send(&[0xfe;4096],Reliability::ReliableOrdered).await.unwrap();
             println!("Game packet!");
         }
     }

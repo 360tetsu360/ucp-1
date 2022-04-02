@@ -16,7 +16,7 @@ const UDP_HEADER: usize = 32;
 const DATAGRAM_FLAG: u8 = 0x80;
 const NEEDS_B_AND_AS_FLAG: u8 = 0x4;
 const MAX_RTO: Duration = Duration::from_secs(10);
-const MIN_RTO: Duration = Duration::from_secs(1);
+const MIN_RTO: Duration = Duration::from_millis(1000);
 
 #[derive(Clone)]
 pub(crate) struct OutPacket {
@@ -42,6 +42,10 @@ struct SentConf {
     pub time: Instant,
 }
 
+const ALPHA : f32 = 0.125;
+const BETA : f32 = 0.25;
+const K : u32 = 1;
+
 struct Rtts {
     pub srtt: Duration,
     pub rttvar: Duration,
@@ -62,9 +66,9 @@ impl Rto {
 
     pub fn compute(&mut self, rtt: Duration) {
         if let Some(rtts) = self.rtts.as_mut() {
-            let new_rttvar = rtts.rttvar.mul_f32(0.75) + absolute_div(rtts.srtt, rtt).mul_f32(0.25);
-            let new_srtt = rtts.srtt.mul_f32(0.875) + rtt.mul_f32(0.125);
-            let mut rto = rtts.srtt + 4 * rtts.rttvar;
+            let new_rttvar = rtts.rttvar.mul_f32(1. - BETA) + absolute_div(rtts.srtt, rtt).mul_f32(BETA);
+            let new_srtt = rtts.srtt.mul_f32(1. - ALPHA) + rtt.mul_f32(ALPHA);
+            let mut rto = rtts.srtt + K * rtts.rttvar;
             rto = cmp::max(cmp::min(rto, MAX_RTO), MIN_RTO);
             self.rto = rto;
             rtts.srtt = new_srtt;
@@ -72,7 +76,8 @@ impl Rto {
         } else {
             let srtt = rtt;
             let rttvar = rtt / 2;
-            self.rto = srtt + 4 * rttvar;
+            let rto = srtt + K * rttvar;
+            self.rto = cmp::max(cmp::min(rto, MAX_RTO), MIN_RTO);
             self.rtts = Some(Rtts { srtt, rttvar });
         }
     }
@@ -91,6 +96,8 @@ pub(crate) struct DatagramSender {
     rto: Rto,
 
     sequence: u32,
+
+    is_congestion : bool,
 
     mindex: u32,
     sindex: u32,
@@ -112,11 +119,12 @@ impl DatagramSender {
             cubic: Cubic::new(mtu),
             rto: Rto::new(),
             sequence: 0,
+            is_congestion : false,
             mindex: 0,
             sindex: 0,
             oindex: 0,
             fragment_id: 0,
-            nodelay: true,
+            nodelay: false,
         }
     }
 
@@ -132,11 +140,7 @@ impl DatagramSender {
         if let Some(next_packet) = self.sendable_packet_index() {
             if !self.nodelay {
                 // Skip if this is the only packet that can be sent
-                if next_packet + 1 == self.buffer.len() {
-                    return Ok(());
-                }
-
-                if !self.sent.is_empty() {
+                if next_packet + 1 == self.buffer.len() && !self.sent.is_empty() {
                     return Ok(());
                 }
             }
@@ -157,6 +161,8 @@ impl DatagramSender {
                 sequence: self.sequence,
                 time: Instant::now(),
             });
+
+            self.sent.push(self.sequence);
 
             self.sequence += 1;
         }
@@ -179,7 +185,7 @@ impl DatagramSender {
 
     pub async fn send(
         &mut self,
-        mut bytes: Vec<u8>,
+        bytes: Vec<u8>,
         reliability: Reliability,
     ) -> std::io::Result<()> {
         let mut frame = Frame {
@@ -202,18 +208,6 @@ impl DatagramSender {
             frame.oindex = self.oindex;
             self.oindex += 1;
         }
-
-        /*let mut buff = vec![];
-        let mut writer = std::io::Cursor::new(&mut buff);
-        let id = DATAGRAM_FLAG | NEEDS_B_AND_AS_FLAG;
-
-        u8::encode(&id, &mut writer)?;
-        U24::encode(&self.sequence, &mut writer)?;
-        frame.encode(&mut writer)?;
-        buff.append(&mut bytes);
-        self.udp.send_to(&buff, self.address).await?;
-
-        self.sequence += 1;*/
 
         let out_packet = OutPacket { frame, data: bytes };
         self.push_outpacket(out_packet);
@@ -284,7 +278,7 @@ impl DatagramSender {
     pub async fn ack(&mut self, ack: Ack) -> std::io::Result<()> {
         let mut ack_cnt = 0;
         let mut sent = None;
-        for seq in ack.ack.sequences.0..ack.ack.sequences.1 {
+        for seq in ack.ack.sequences.0..ack.ack.sequences.1 + 1 {
             if self.sent.contains(&seq) {
                 ack_cnt += 1;
 
@@ -296,7 +290,15 @@ impl DatagramSender {
                     .iter()
                     .position(|(_, x, _)| x.as_ref().unwrap().sequence == seq)
                     .unwrap();
-                sent = Some(self.buffer.remove(index).unwrap().1.unwrap().time);
+                
+                let sent_packet = self.buffer.remove(index).unwrap();
+                sent = Some(sent_packet.1.as_ref().unwrap().time);
+                
+                if let Some(_) = sent_packet.2 {
+                    if self.buffer.iter().all(|p|p.2.is_none()) {
+                        self.is_congestion = false;
+                    }
+                }
 
                 self.send_next().await?;
             }
@@ -313,7 +315,8 @@ impl DatagramSender {
     }
 
     pub async fn nack(&mut self, nack: Nack) -> std::io::Result<()> {
-        for seq in nack.nack.sequences.0..nack.nack.sequences.1 {
+        let mut sent = None;
+        for seq in nack.nack.sequences.0..nack.nack.sequences.1 + 1 {
             if self.sent.contains(&seq) {
                 let index = self.sent.iter().position(|x| *x == seq).unwrap();
                 self.sent.remove(index);
@@ -329,12 +332,20 @@ impl DatagramSender {
                         self.buffer[index].0.insert(0, out);
                     }
                 }
+                sent = Some(self.buffer[index].1.as_ref().unwrap().time);
                 self.buffer[index].1 = None;
             }
         }
+        
+        if let Some(time) = sent {
+            self.cubic.on_congestion_event(time);
 
-        // TODO : update congestion window
-        // TODO : send_next()
+            if self.cubic.cwnd > self.sent.len() as u32 {
+                for _ in self.sent.len() as u32..self.cubic.cwnd {
+                    self.send_next().await?;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -347,18 +358,28 @@ impl DatagramSender {
             .filter(|p| p.1.is_some())
             .filter(|(_, conf, _)| now.duration_since(conf.as_ref().unwrap().time) > self.rto.rto);
 
+        let mut sent = None;
+
         for (stack, conf, count) in timeouted {
             let mut resends = vec![];
             while let Some(out) = stack.pop() {
                 if out.frame.reliability.reliable() {
-                    resends.insert(0, out);
+                    resends.push(out);
                 }
             }
             *stack = resends;
+
+            sent = Some(conf.as_ref().unwrap().time);
+
+            let seq = conf.as_ref().unwrap().sequence;
+            let index = self.sent.iter().position(|x| *x == seq).unwrap();
+            self.sent.remove(index);
+
+
             *conf = None;
 
             if let Some(count) = count {
-                if *count >= 5 {
+                if *count >= 4 {
                     // connection lost;
                     return Ok(true);
                 }
@@ -366,8 +387,20 @@ impl DatagramSender {
             }
         }
 
-        // TODO : update congestion window and rto
-        // TODO : send_next()
+        if let Some(time) = sent {
+            if !self.is_congestion {
+                // congestion event.
+                self.cubic.on_congestion_event(time);
+                self.rto.rto = cmp::min(self.rto.rto * 2,MAX_RTO);
+                self.is_congestion = true;
+            }
+
+            if self.cubic.cwnd > self.sent.len() as u32 {
+                for _ in self.sent.len() as u32..self.cubic.cwnd {
+                    self.send_next().await?;
+                }
+            }
+        }
 
         Ok(false)
     }

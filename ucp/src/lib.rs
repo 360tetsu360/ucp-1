@@ -1,8 +1,8 @@
-use std::{collections::HashMap, future::Future, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, net::SocketAddr, sync::Arc, time::Duration, cmp};
 
 use conn::Conn;
 use packet_derive::*;
-use packets::Reliability;
+pub use packets::Reliability;
 use system_packets::*;
 use tokio::{
     net::{ToSocketAddrs, UdpSocket},
@@ -12,7 +12,7 @@ use tokio::{
 
 pub(crate) mod conn;
 pub(crate) mod cubic;
-pub mod packets;
+pub(crate) mod packets;
 pub(crate) mod receive;
 pub(crate) mod send;
 pub(crate) mod system_packets;
@@ -23,8 +23,14 @@ pub const MAX_MTU_SIZE: u16 = 1400;
 type Udp = Arc<UdpSocket>;
 type Session = Arc<Mutex<Conn>>;
 
+pub(crate) enum ConnEvent {
+    Packet(Vec<u8>),
+    Disconnected,
+    Timeout,
+}
+
 pub struct UcpSession {
-    receiver: mpsc::Receiver<Vec<u8>>,
+    receiver: mpsc::Receiver<ConnEvent>,
     addr: SocketAddr,
     conn: Session,
 
@@ -89,7 +95,7 @@ impl UcpSession {
                     let ocrequest2 = OpenConnectionRequest2 {
                         magic: (),
                         address: remote,
-                        mtu: mtu(reply1.mtu_size),
+                        mtu: cmp::min(reply1.mtu_size,MAX_MTU_SIZE),
                         guid,
                     };
                     let mut bytes = vec![];
@@ -121,7 +127,7 @@ impl UcpSession {
         let (s, r) = mpsc::channel(128);
         let conn = Arc::new(Mutex::new(Conn::new(
             remote,
-            mtu(reply2.mtu) as usize,
+            cmp::min(reply2.mtu,MAX_MTU_SIZE) as usize,
             udp.clone(),
             s,
         )));
@@ -156,7 +162,7 @@ impl UcpSession {
 
     fn init_with_conn(
         conn: Session,
-        receiver: mpsc::Receiver<Vec<u8>>,
+        receiver: mpsc::Receiver<ConnEvent>,
         addr: SocketAddr,
         sender: Option<mpsc::Sender<SocketAddr>>,
         udp: Option<Udp>,
@@ -215,8 +221,17 @@ impl UcpSession {
 
     pub async fn recv(&mut self) -> std::io::Result<Vec<u8>> {
         loop {
-            if let Some(packet) = self.receiver.recv().await {
-                return Ok(packet);
+            match self.receiver.recv().await {
+                Some(ConnEvent::Packet(bytes)) => {
+                    return Ok(bytes)
+                },
+                Some(ConnEvent::Disconnected) => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset,"Connection closed"))
+                }
+                Some(ConnEvent::Timeout) => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"Connection timeout"))
+                }
+                None => {},
             }
         }
     }
@@ -381,7 +396,7 @@ impl UcpListener {
             magic: (),
             guid: self.guid,
             use_encryption: false,
-            mtu_size: mtu(packet.mtu_size),
+            mtu_size: cmp::min(packet.mtu_size,MAX_MTU_SIZE),
         };
         let mut bytes = vec![];
         encode_syspacket(reply, &mut bytes)?;
@@ -393,9 +408,9 @@ impl UcpListener {
         &mut self,
         v: &[u8],
         src: SocketAddr,
-    ) -> std::io::Result<(Session, mpsc::Receiver<Vec<u8>>)> {
+    ) -> std::io::Result<(Session, mpsc::Receiver<ConnEvent>)> {
         let packet: OpenConnectionRequest2 = decode_syspacket(v)?;
-        let mtu = mtu(packet.mtu);
+        let mtu = cmp::min(packet.mtu,MAX_MTU_SIZE);
         let reply = OpenConnectionReply2 {
             magic: (),
             guid: self.guid,
@@ -418,14 +433,7 @@ impl UcpListener {
     }
 }
 
-fn mtu(old: u16) -> u16 {
-    if old > MAX_MTU_SIZE {
-        return MAX_MTU_SIZE;
-    }
-    old
-}
-
-fn time() -> u64 {
+pub(crate) fn time() -> u64 {
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
